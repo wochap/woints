@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="stylesheet" href="_ds/nocturne-53929d40-05df-499c-bc14-17884e999fc5/styles.css">
+<script src="_ds/nocturne-53929d40-05df-499c-bc14-17884e999fc5/_ds_bundle.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);--hb:#11111b;--hf:#cdd6f4;--hd:#a6adc8;--ha:#cba6f7;--hbd:#6c7086;--ho:#b4befe;--hv:#94e2d5;--hfb:#a6e3a1;--hff:#11111b;--hdb:#fab387;--hdf:#11111b;--hs:#89b4fa;--hxb:#181825;--hxf:#6c7086;--hpm:#cba6f7;--hpr:#a6adc8;--hcase:none;--hfont:'Atkinson Hyperlegible Mono',ui-monospace,monospace}
+a{color:var(--color-accent-300)}a:hover{color:var(--color-accent-200)}
+</style>
+</helmet>
+<div style="{{ rootVars }}">
+<div style="width:2480px;padding:56px;box-sizing:border-box;display:flex;flex-direction:column;gap:40px">
+
+<header style="display:flex;gap:56px;align-items:flex-start">
+  <div style="display:flex;flex-direction:column;gap:10px;width:640px">
+    <div style="font:500 12px var(--font-body);color:var(--color-accent-300);letter-spacing:.04em">WOINTS · OVERLAY SPEC · v0.1</div>
+    <h1 style="margin:0;font:500 40px/1.1 var(--font-heading);color:var(--color-text)">Keyboard hint overlay for Hyprland</h1>
+    <p style="margin:0;font:400 14px/1.55 var(--font-body);color:var(--color-neutral-300);text-wrap:pretty">Badges on a transparent full-screen layer. Every element below is a rounded rect, an optional 1 px stroke, and one text run — directly reproducible in tiny-skia. Colours: Catppuccin Mocha (dark, default) and Latte (light).</p>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:6px;font:400 12.5px/1.5 var(--font-body);color:var(--color-neutral-300);width:700px">
+    <div style="font:500 12px var(--font-body);color:var(--color-text)">Assumptions</div>
+    <div>• Badges are opaque, so label contrast never depends on what is underneath. Only the badge edge does — tested in <a href="#f8">08</a>.</div>
+    <div>• Units are logical px × output scale, rounded to device px; the badge origin snaps to the device grid.</div>
+    <div>• Latte flash/drag text borrows Mocha crust <span style="font-family:var(--hfont)">#11111b</span>: no Latte colour reaches AA on Latte green or peach.</div>
+    <div>• Grey dashed lines in this doc are annotations, not overlay. Tweaks: theme, label case, typed-prefix treatment.</div>
+  </div>
+</header>
+
+<div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+
+<!-- 01 ANATOMY -->
+<div id="f1" style="width:820px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:20px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">01</span><h2 style="margin:0;font:500 18px var(--font-heading)">Hint badge anatomy</h2></div>
+  <div style="display:flex;gap:40px;align-items:flex-start">
+    <div style="position:relative;width:300px;height:230px">
+      <div style="position:absolute;left:40px;top:40px;width:200px;height:136px;box-sizing:border-box;border:8px solid var(--hbd);border-radius:24px;background:var(--hb);color:var(--hf);display:flex;align-items:center;padding:0 24px;font:700 88px/1 var(--hfont);text-transform:var(--hcase)">as</div>
+      <div style="position:absolute;left:40px;top:20px;width:200px;border-top:1px dashed var(--color-neutral-500)"></div>
+      <div style="position:absolute;left:96px;top:4px;font:500 11px ui-monospace,monospace;color:var(--color-neutral-300)">w = n·0.6em + 2·3 + 2 → 22</div>
+      <div style="position:absolute;left:256px;top:40px;height:136px;border-left:1px dashed var(--color-neutral-500)"></div>
+      <div style="position:absolute;left:262px;top:100px;font:500 11px ui-monospace,monospace;color:var(--color-neutral-300)">h 17</div>
+      <div style="position:absolute;left:40px;top:186px;width:24px;border-top:1px solid var(--color-neutral-400)"></div>
+      <div style="position:absolute;left:24px;top:196px;font:500 11px ui-monospace,monospace;color:var(--color-neutral-300)">pad-x 3</div>
+      <div style="position:absolute;left:96px;top:196px;font:500 11px ui-monospace,monospace;color:var(--color-neutral-300)">radius 3 · border 1</div>
+      <div style="position:absolute;left:96px;top:212px;font:400 11px var(--font-body);color:var(--color-neutral-500)">shown ×8</div>
+    </div>
+    <div style="display:grid;grid-template-columns:130px 1fr;gap:7px 14px;font:400 12.5px/1.4 var(--font-body);color:var(--color-neutral-300);flex:1">
+      <span style="font-family:var(--hfont);color:var(--color-text)">hint.font</span><span>Atkinson Hyperlegible Mono Bold (OFL). Distinct a/d/g/q, open counters. Fallback JetBrains Mono Bold.</span>
+      <span style="font-family:var(--hfont);color:var(--color-text)">hint.size</span><span>11 px logical (em box). Floor <b style="color:var(--color-text);font-weight:500">10 px</b>; below that, use bigger badges, not smaller text.</span>
+      <span style="font-family:var(--hfont);color:var(--color-text)">hint.padding</span><span>[2, 3] — y, x. Height = size + 2·pad-y + 2·border = 17.</span>
+      <span style="font-family:var(--hfont);color:var(--color-text)">hint.radius</span><span>3 px. Fill rect then stroke rect inset ½ px.</span>
+      <span style="font-family:var(--hfont);color:var(--color-text)">border</span><span>1 device px at &lt;2×, floor(scale) above. Never fractional.</span>
+      <span style="font-family:var(--hfont);color:var(--color-text)">labels</span><span>Home row <span style="font-family:var(--hfont)">asdfghjkl</span>, 1–3 glyphs, prefix-free. Lowercase default; <span style="font-family:var(--hfont)">hint.uppercase = true</span> toggles.</span>
+      <span style="font-family:var(--hfont);color:var(--color-text)">shadow</span><span>None. Separation comes from the 1 px border.</span>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:8px">
+    <div style="font:500 13px var(--font-body)">Scale rendering — device px, rounded per output</div>
+    <div style="display:grid;grid-template-columns:70px 60px 70px 70px 60px 90px 1fr;gap:0;font:400 12px var(--font-body);color:var(--color-neutral-300)">
+      <span style="padding:6px 0;color:var(--color-neutral-500)">scale</span><span style="padding:6px 0;color:var(--color-neutral-500)">font</span><span style="padding:6px 0;color:var(--color-neutral-500)">pad y/x</span><span style="padding:6px 0;color:var(--color-neutral-500)">radius</span><span style="padding:6px 0;color:var(--color-neutral-500)">border</span><span style="padding:6px 0;color:var(--color-neutral-500)">badge (2 gl.)</span><span style="padding:6px 0;color:var(--color-neutral-500)">rendered at device px</span>
+    </div>
+    <sc-for list="{{ scaleRows }}" as="r" hint-placeholder-count="4">
+      <div style="display:grid;grid-template-columns:70px 60px 70px 70px 60px 90px 1fr;align-items:center;font:400 12px ui-monospace,monospace;color:var(--color-neutral-200);border-top:1px solid var(--color-divider);padding:8px 0">
+        <span>{{ r.s }}</span><span>{{ r.font }}</span><span>{{ r.pad }}</span><span>{{ r.radius }}</span><span>{{ r.border }}</span><span>{{ r.size }}</span>
+        <div style="display:flex;gap:10px;align-items:center;background:#1e1e2e;padding:8px 10px;border-radius:4px;width:fit-content"><span style="{{ r.style }}">as</span><span style="{{ r.style }}">j</span><span style="{{ r.styleMin }}">kl</span><span style="font:400 10px var(--font-body);color:#a6adc8">min {{ r.minFont }}px</span></div>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:10px">
+    <div style="font:500 13px var(--font-body)">Placement</div>
+    <div style="display:flex;gap:24px">
+      <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+        <div style="position:relative;height:110px;background:#eff1f5;border-radius:6px">
+          <div style="position:absolute;left:90px;top:40px;width:96px;height:30px;border-radius:4px;background:#dce0e8;border:1px solid #bcc0cc;font:500 12px var(--font-body);color:#4c4f69;display:flex;align-items:center;justify-content:center">Save as…</div>
+          <span style="position:absolute;left:87px;top:37px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">sd</span>
+          <div style="position:absolute;left:60px;top:40px;width:28px;border-top:1px dashed #8c8fa1"></div>
+          <div style="position:absolute;left:90px;top:12px;height:26px;border-left:1px dashed #8c8fa1"></div>
+          <div style="position:absolute;left:198px;top:47px;font:500 11px ui-monospace,monospace;color:#5c5f77">offset (−3, −3)</div>
+        </div>
+        <div style="font:400 12px/1.45 var(--font-body);color:var(--color-neutral-300)"><b style="font-weight:500;color:var(--color-text)">Default:</b> badge top-left = target top-left + <span style="font-family:var(--hfont)">hint.offset</span>. Covers only the target's corner, rarely its label.</div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+        <div style="position:relative;height:110px;background:#eff1f5;border-radius:6px">
+          <div style="position:absolute;left:60px;top:46px;width:14px;height:14px;border-radius:3px;border:1.5px solid #7c7f93;box-sizing:border-box"></div>
+          <div style="position:absolute;left:82px;top:46px;font:400 12px var(--font-body);color:#4c4f69">Remember me</div>
+          <span style="position:absolute;left:56px;top:44px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">f</span>
+          <div style="position:absolute;left:200px;top:38px;width:16px;height:16px;display:flex;align-items:center;justify-content:center;font:400 14px var(--font-body);color:#4c4f69">×</div>
+          <span style="position:absolute;left:197px;top:38px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">gh</span>
+          <div style="position:absolute;left:240px;top:44px;font:500 11px ui-monospace,monospace;color:#5c5f77">14 / 16 px targets</div>
+        </div>
+        <div style="font:400 12px/1.45 var(--font-body);color:var(--color-neutral-300)"><b style="font-weight:500;color:var(--color-text)">Tiny (&lt; 20 px either side):</b> badge centred on the target centre. An outset badge would be bigger than the target and land on its neighbour.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 02 STATES -->
+<div id="f2" style="width:820px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">02</span><h2 style="margin:0;font:500 18px var(--font-heading)">Badge states</h2><span style="font:400 12px var(--font-body);color:var(--color-neutral-400)">over a code editor, a white page, a photo</span></div>
+  <div style="display:grid;grid-template-columns:280px 1fr 1fr 1fr;gap:8px;align-items:center">
+    <span></span><span style="font:400 11px var(--font-body);color:var(--color-neutral-500)">editor #1e1e2e</span><span style="font:400 11px var(--font-body);color:var(--color-neutral-500)">web #ffffff</span><span style="font:400 11px var(--font-body);color:var(--color-neutral-500)">photo</span>
+
+    <div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 13px var(--font-body)">Idle</span><span style="font:400 11.5px/1.4 var(--font-body);color:var(--color-neutral-400)">bg · fg · border. Appears instantly (0 ms).</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#1e1e2e;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:70px;height:4px;background:#cba6f7;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:110px;height:4px;background:#a6e3a1;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#ffffff;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:120px;height:4px;background:#3c3c3c;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:60px;height:4px;background:#1a73e8;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+    <div style="height:52px;border-radius:4px;overflow:hidden;background:url(assets/photo.jpg) 20% 30%/cover;display:flex;align-items:center;justify-content:center"><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+
+    <div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 13px var(--font-body)">Typed prefix <span style="font-family:var(--hfont);color:var(--color-accent-300)">a</span></span><span style="font:400 11.5px/1.4 var(--font-body);color:var(--color-neutral-400)">{{ prefixNote }}</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#1e1e2e;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:70px;height:4px;background:#cba6f7;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:110px;height:4px;background:#a6e3a1;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);font:700 11px/1 var(--hfont);text-transform:var(--hcase)"><span style="color:var(--hpm)">a</span><span style="color:var(--hpr)">s</span></span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#ffffff;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:120px;height:4px;background:#3c3c3c;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:60px;height:4px;background:#1a73e8;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);font:700 11px/1 var(--hfont);text-transform:var(--hcase)"><span style="color:var(--hpm)">a</span><span style="color:var(--hpr)">s</span></span></div>
+    <div style="height:52px;border-radius:4px;overflow:hidden;background:url(assets/photo.jpg) 50% 50%/cover;display:flex;align-items:center;justify-content:center"><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);font:700 11px/1 var(--hfont);text-transform:var(--hcase)"><span style="color:var(--hpm)">a</span><span style="color:var(--hpr)">s</span></span></div>
+
+    <div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 13px var(--font-body)">Eliminated</span><span style="font:400 11.5px/1.4 var(--font-body);color:var(--color-neutral-400)">Prefix mismatch → removed on the same frame. <span style="font-family:var(--hfont)">hint.eliminated = "fade"</span> keeps it at 20 % alpha (60 ms) for orientation.</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#1e1e2e;display:flex;align-items:center;justify-content:center;gap:16px"><span style="width:22px;height:17px;border:1px dashed #6c7086;border-radius:3px;box-sizing:border-box"></span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase);opacity:.2">kl</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#ffffff;display:flex;align-items:center;justify-content:center;gap:16px"><span style="width:22px;height:17px;border:1px dashed #9ca0b0;border-radius:3px;box-sizing:border-box"></span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase);opacity:.2">kl</span></div>
+    <div style="height:52px;border-radius:4px;overflow:hidden;background:url(assets/photo.jpg) 70% 60%/cover;display:flex;align-items:center;justify-content:center;gap:16px"><span style="width:22px;height:17px;border:1px dashed #9ca0b0;border-radius:3px;box-sizing:border-box"></span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase);opacity:.2">kl</span></div>
+
+    <div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 13px var(--font-body)">Selected flash</span><span style="font:400 11.5px/1.4 var(--font-body);color:var(--color-neutral-400)">Full match → flash_bg / flash_fg for 80 ms, overlay unmaps, then the action fires.</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#1e1e2e;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:70px;height:4px;background:#cba6f7;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:110px;height:4px;background:#a6e3a1;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hfb);border-radius:3px;background:var(--hfb);color:var(--hff);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#ffffff;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:120px;height:4px;background:#3c3c3c;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:60px;height:4px;background:#1a73e8;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hfb);border-radius:3px;background:var(--hfb);color:var(--hff);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+    <div style="height:52px;border-radius:4px;overflow:hidden;background:url(assets/photo.jpg) 30% 80%/cover;display:flex;align-items:center;justify-content:center"><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hfb);border-radius:3px;background:var(--hfb);color:var(--hff);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+
+    <div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 13px var(--font-body)">Low confidence (vision)</span><span style="font:400 11.5px/1.4 var(--font-body);color:var(--color-neutral-400)">Vision-detected target: 1 px dashed border in hint.vision, dash [2, 2]. Text unchanged.</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#1e1e2e;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:70px;height:4px;background:#cba6f7;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:110px;height:4px;background:#a6e3a1;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px dashed var(--hv);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#ffffff;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:120px;height:4px;background:#3c3c3c;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:60px;height:4px;background:#1a73e8;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px dashed var(--hv);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+    <div style="height:52px;border-radius:4px;overflow:hidden;background:url(assets/photo.jpg) 80% 20%/cover;display:flex;align-items:center;justify-content:center"><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px dashed var(--hv);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+
+    <div style="display:flex;flex-direction:column;gap:2px"><span style="font:500 13px var(--font-body)">Disabled / unreachable</span><span style="font:400 11.5px/1.4 var(--font-body);color:var(--color-neutral-400)">Shown for orientation, not typeable (keys skip it). disabled_bg, no border. Exempt from AA as an inactive control.</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#1e1e2e;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:70px;height:4px;background:#cba6f7;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:110px;height:4px;background:#a6e3a1;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hxb);border-radius:3px;background:var(--hxb);color:var(--hxf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+    <div style="position:relative;height:52px;border-radius:4px;overflow:hidden;background:#ffffff;display:flex;align-items:center;justify-content:center"><div style="position:absolute;left:10px;top:12px;width:120px;height:4px;background:#3c3c3c;border-radius:2px"></div><div style="position:absolute;left:10px;top:34px;width:60px;height:4px;background:#1a73e8;border-radius:2px"></div><span style="position:relative;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hxb);border-radius:3px;background:var(--hxb);color:var(--hxf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+    <div style="height:52px;border-radius:4px;overflow:hidden;background:url(assets/photo.jpg) 10% 90%/cover;display:flex;align-items:center;justify-content:center"><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hxb);border-radius:3px;background:var(--hxb);color:var(--hxf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+  </div>
+  <div style="font:400 11.5px/1.5 var(--font-body);color:var(--color-neutral-400);text-wrap:pretty">Timing: appear 0 ms · eliminate 0 ms (fade 60 ms) · flash 80 ms · all ≤ 120 ms, linear alpha only. Typed prefix stays one text run: colour is chosen per glyph cluster (index &lt; buffer length), not per run.</div>
+</div>
+
+<!-- 03 OUTLINE -->
+<div id="f3" style="width:700px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">03</span><h2 style="margin:0;font:500 18px var(--font-heading)">Target outline</h2><span style="font:400 12px var(--font-body);color:var(--color-neutral-400)">hint.outline = false (default) / true</span></div>
+  <div style="display:flex;gap:16px">
+    <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+      <div style="position:relative;height:200px;background:#242424;border-radius:6px">
+        <div style="position:absolute;left:20px;top:22px;font:500 13px var(--font-body);color:#e0e0e0">Preferences</div>
+        <div style="position:absolute;left:20px;top:58px;width:240px;height:28px;border-radius:5px;background:#363636"></div>
+        <div style="position:absolute;left:20px;top:102px;width:36px;height:20px;border-radius:10px;background:#3a6ea5"></div>
+        <div style="position:absolute;left:66px;top:105px;font:400 12px var(--font-body);color:#cfcfcf">Dark mode</div>
+        <div style="position:absolute;left:140px;top:150px;width:60px;height:28px;border-radius:5px;background:#363636;font:500 12px var(--font-body);color:#e0e0e0;display:flex;align-items:center;justify-content:center">Cancel</div>
+        <div style="position:absolute;left:210px;top:150px;width:60px;height:28px;border-radius:5px;background:#3a6ea5;font:500 12px var(--font-body);color:#ffffff;display:flex;align-items:center;justify-content:center">Apply</div>
+        <span style="position:absolute;left:17px;top:55px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">a</span>
+        <span style="position:absolute;left:17px;top:99px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">s</span>
+        <span style="position:absolute;left:137px;top:147px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">d</span>
+        <span style="position:absolute;left:207px;top:147px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">f</span>
+      </div>
+      <div style="font:400 12px var(--font-body);color:var(--color-neutral-300)">Without — quietest; default.</div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+      <div style="position:relative;height:200px;background:#242424;border-radius:6px">
+        <div style="position:absolute;left:20px;top:22px;font:500 13px var(--font-body);color:#e0e0e0">Preferences</div>
+        <div style="position:absolute;left:20px;top:58px;width:240px;height:28px;border-radius:5px;background:#363636"></div>
+        <div style="position:absolute;left:20px;top:102px;width:36px;height:20px;border-radius:10px;background:#3a6ea5"></div>
+        <div style="position:absolute;left:66px;top:105px;font:400 12px var(--font-body);color:#cfcfcf">Dark mode</div>
+        <div style="position:absolute;left:140px;top:150px;width:60px;height:28px;border-radius:5px;background:#363636;font:500 12px var(--font-body);color:#e0e0e0;display:flex;align-items:center;justify-content:center">Cancel</div>
+        <div style="position:absolute;left:210px;top:150px;width:60px;height:28px;border-radius:5px;background:#3a6ea5;font:500 12px var(--font-body);color:#ffffff;display:flex;align-items:center;justify-content:center">Apply</div>
+        <div style="position:absolute;left:20px;top:58px;width:240px;height:28px;border:1px solid var(--ho);border-radius:2px;box-sizing:border-box"></div>
+        <div style="position:absolute;left:20px;top:102px;width:36px;height:20px;border:1px solid var(--ho);border-radius:2px;box-sizing:border-box"></div>
+        <div style="position:absolute;left:140px;top:150px;width:60px;height:28px;border:1px solid var(--ho);border-radius:2px;box-sizing:border-box"></div>
+        <div style="position:absolute;left:210px;top:150px;width:60px;height:28px;border:1px solid var(--ho);border-radius:2px;box-sizing:border-box"></div>
+        <span style="position:absolute;left:17px;top:55px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">a</span>
+        <span style="position:absolute;left:17px;top:99px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">s</span>
+        <span style="position:absolute;left:137px;top:147px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">d</span>
+        <span style="position:absolute;left:207px;top:147px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">f</span>
+      </div>
+      <div style="font:400 12px var(--font-body);color:var(--color-neutral-300)">With — 1 px hint.outline stroke on the target rect, radius 2, drawn under badges.</div>
+    </div>
+  </div>
+  <div style="font:400 11.5px/1.5 var(--font-body);color:var(--color-neutral-400);text-wrap:pretty">Outlines turn on automatically for vision targets (dashed, hint.vision) and while a prefix is typed — only for the remaining candidates, so the eye lands on what is left.</div>
+</div>
+
+<!-- 04 OVERLAP -->
+<div id="f4" style="width:1180px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">04</span><h2 style="margin:0;font:500 18px var(--font-heading)">Overlap handling</h2><span style="font:400 12px var(--font-body);color:var(--color-neutral-400)">badges may cover target content — never another badge</span></div>
+  <div style="display:flex;gap:28px;align-items:flex-start">
+    <div style="flex:1;display:flex;flex-direction:column;gap:20px;min-width:0">
+
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="font:500 13px var(--font-body)">Toolbar, 12 icons at 24 px pitch — fits as-is</div>
+        <div style="position:relative;height:52px;background:#2b2b2b;border-radius:6px">
+          <sc-for list="{{ tbA.icons }}" as="i" hint-placeholder-count="12"><div style="position:absolute;left:{{ i.x }}px;top:{{ i.y }}px;width:18px;height:18px;border-radius:4px;background:#4a4a4a"></div></sc-for>
+          <sc-for list="{{ tbA.badges }}" as="b" hint-placeholder-count="0"><span style="position:absolute;left:{{ b.x }}px;top:{{ b.y }}px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">{{ b.label }}</span></sc-for>
+        </div>
+        <div style="font:400 11.5px var(--font-body);color:var(--color-neutral-400)">2-glyph badge = 22 px; at −3 offset the next badge starts 2 px later = hint.gap.</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="font:500 13px var(--font-body)">Dense toolbar, 18 px pitch — alternate badges drop below</div>
+        <div style="position:relative;height:78px;background:#2b2b2b;border-radius:6px">
+          <sc-for list="{{ tbB.icons }}" as="i" hint-placeholder-count="12"><div style="position:absolute;left:{{ i.x }}px;top:{{ i.y }}px;width:16px;height:16px;border-radius:3px;background:#4a4a4a"></div></sc-for>
+          <sc-for list="{{ tbB.badges }}" as="b" hint-placeholder-count="0"><span style="position:absolute;left:{{ b.x }}px;top:{{ b.y }}px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">{{ b.label }}</span></sc-for>
+        </div>
+        <div style="font:400 11.5px var(--font-body);color:var(--color-neutral-400)">Not a special case: rule 3 — top-left collides with the left neighbour, so "below" (top = target bottom + 1) wins.</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="font:500 13px var(--font-body)">Browser tab strip — tabs at top-left, close buttons centred</div>
+        <div style="position:relative;height:58px;background:#dce0e8;border-radius:6px;overflow:hidden">
+          <sc-for list="{{ tabs.tabs }}" as="t" hint-placeholder-count="7"><div style="position:absolute;left:{{ t.x }}px;top:14px;width:{{ t.w }}px;height:34px;border-radius:6px 6px 0 0;background:{{ t.bg }};display:flex;align-items:center;gap:6px;padding:0 10px;box-sizing:border-box"><div style="width:14px;height:14px;border-radius:3px;background:#9ca0b0;flex:none"></div><div style="height:4px;width:{{ t.tw }}px;background:#7c7f93;border-radius:2px"></div></div></sc-for>
+          <sc-for list="{{ tabs.closes }}" as="c" hint-placeholder-count="5"><div style="position:absolute;left:{{ c.x }}px;top:23px;width:16px;height:16px;font:400 13px/16px var(--font-body);text-align:center;color:#5c5f77">×</div></sc-for>
+          <div style="position:absolute;left:{{ tabs.plusX }}px;top:17px;width:28px;height:28px;font:400 18px/28px var(--font-body);text-align:center;color:#5c5f77">+</div>
+          <sc-for list="{{ tabs.badges }}" as="b" hint-placeholder-count="0"><span style="position:absolute;left:{{ b.x }}px;top:{{ b.y }}px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">{{ b.label }}</span></sc-for>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:20px">
+        <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+          <div style="font:500 13px var(--font-body)">Nested targets sharing a corner</div>
+          <div style="position:relative;height:130px;background:#eff1f5;border-radius:6px">
+            <div style="position:absolute;left:30px;top:24px;width:220px;height:84px;border-radius:6px;background:#ffffff;border:1px solid #ccd0da"></div>
+            <div style="position:absolute;left:38px;top:32px;width:64px;height:22px;border-radius:4px;background:#dce0e8;font:500 11px/22px var(--font-body);text-align:center;color:#4c4f69">Follow</div>
+            <span style="position:absolute;left:27px;top:21px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">j</span>
+            <span style="position:absolute;left:35px;top:55px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">k</span>
+            <span style="position:absolute;left:35px;top:29px;width:15px;height:17px;border:1px dashed #8c8fa1;border-radius:3px;box-sizing:border-box"></span>
+            <div style="position:absolute;left:112px;top:36px;font:400 11px ui-monospace,monospace;color:#5c5f77">← preferred slot taken</div>
+          </div>
+        </div>
+        <div style="flex:1.2;display:flex;flex-direction:column;gap:6px;font:400 12px/1.45 var(--font-body);color:var(--color-neutral-300)">
+          <div style="font:500 13px var(--font-body);color:var(--color-text)">Placement rules</div>
+          <div>1 · Preferred slot: top-left + (−3, −3); targets &lt; 20 px are centred.</div>
+          <div>2 · Clamp inside the output with a 1 px inset (see <a href="#f9">09</a>).</div>
+          <div>3 · Place in reading order (y, then x). If the rect + 2 px gap hits a placed badge, try: <span style="font-family:var(--hfont);color:var(--color-text)">below</span> (top = bottom + 1) → <span style="font-family:var(--hfont);color:var(--color-text)">right of blocker</span> (+gap, max 3 hops) → <span style="font-family:var(--hfont);color:var(--color-text)">above</span> (bottom = top − 1).</div>
+          <div>4 · Still colliding: keep it; draw over, one z-step higher. Rare — log it.</div>
+          <div>5 · Skip targets &lt; 50 % visible or fully occluded by another window.</div>
+          <div>6 · Short labels go to the largest, most central targets first.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="width:300px;display:flex;flex-direction:column;gap:8px">
+      <div style="font:500 13px var(--font-body)">List, 40 rows at 20 px</div>
+      <div style="position:relative;height:{{ list.h }}px;background:#ffffff;border-radius:6px;border:1px solid #ccd0da">
+        <sc-for list="{{ list.rows }}" as="r" hint-placeholder-count="40"><div style="position:absolute;left:0;right:0;top:{{ r.y }}px;height:20px;display:flex;align-items:center;gap:8px;padding:0 10px 0 22px;box-sizing:border-box;background:{{ r.bg }}"><div style="width:12px;height:12px;border-radius:2px;background:#bcc0cc;flex:none"></div><div style="height:4px;width:{{ r.w }}px;background:#7c7f93;border-radius:2px"></div></div></sc-for>
+        <sc-for list="{{ list.badges }}" as="b" hint-placeholder-count="0"><span style="position:absolute;left:{{ b.x }}px;top:{{ b.y }}px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">{{ b.label }}</span></sc-for>
+      </div>
+      <div style="font:400 11.5px/1.45 var(--font-body);color:var(--color-neutral-400)">40 labels from 9 keys: 5 singles + 35 doubles, prefix-free. Rows are badged at x = 1 inside the list (clamped to the scroll viewport, not the window).</div>
+    </div>
+  </div>
+</div>
+
+<!-- 05 MODE CHIPS -->
+<div id="f5" style="width:640px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">05</span><h2 style="margin:0;font:500 18px var(--font-heading)">Mode chip</h2><span style="font:400 12px var(--font-body);color:var(--color-neutral-400)">mode · typed buffer · scope</span></div>
+  <div style="display:flex;gap:24px;align-items:flex-start">
+    <div style="display:flex;flex-direction:column;gap:8px;padding:16px;background:#1e1e2e;border-radius:6px;align-items:flex-start">
+      <sc-for list="{{ chips }}" as="c" hint-placeholder-count="11">
+        <div style="display:inline-flex;align-items:stretch;height:22px;box-sizing:border-box;border:1px solid var(--hbd);border-radius:4px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont)">
+          <span style="display:flex;align-items:center;gap:5px;padding:0 7px"><sc-if value="{{ c.pin }}" hint-placeholder-val="{{ false }}"><span style="width:7px;height:7px;border-radius:2px;background:var(--hdb)"></span></sc-if>{{ c.mode }}</span>
+          <sc-if value="{{ c.sub }}" hint-placeholder-val="{{ false }}"><span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--hd);font-weight:400">{{ c.sub }}</span></sc-if>
+          <span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--ha);min-width:14px;text-transform:var(--hcase)">{{ c.buf }}<span style="width:1px;height:11px;background:var(--ha);margin-left:1px"></span></span>
+          <span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--hd);font-weight:400">{{ c.scope }}</span>
+        </div>
+      </sc-for>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;gap:12px">
+      <div style="position:relative;height:150px;background:#313244;border-radius:6px;overflow:hidden">
+        <div style="position:absolute;left:10px;top:8px;font:400 10px var(--font-body);color:#a6adc8">active monitor (cursor / focused window)</div>
+        <div style="position:absolute;right:12px;bottom:12px;display:inline-flex;align-items:stretch;height:22px;box-sizing:border-box;border:1px solid var(--hbd);border-radius:4px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont)"><span style="display:flex;align-items:center;padding:0 7px">click</span><span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--ha);text-transform:var(--hcase)">s<span style="width:1px;height:11px;background:var(--ha);margin-left:1px"></span></span><span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--hd);font-weight:400">focused</span></div>
+        <div style="position:absolute;right:12px;bottom:40px;font:400 10px ui-monospace,monospace;color:#a6adc8">inset 12</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;font:400 12px/1.45 var(--font-body);color:var(--color-neutral-300)">
+        <div>Bottom-right of the active output, 12 px inset, height 22. Moves to bottom-left if any hint would sit under it.</div>
+        <div>Segments are separate rects + one text run each; dividers are 1 px rects in hint.border.</div>
+        <div>Buffer uses hint.accent — the same colour as matched glyphs. Caret: 1 × 11 px rect.</div>
+        <div>Scope: <span style="font-family:var(--hfont);color:var(--color-text)">focused</span> window · <span style="font-family:var(--hfont);color:var(--color-text)">+layers</span> focused + bars/popups · <span style="font-family:var(--hfont);color:var(--color-text)">layers</span> only · <span style="font-family:var(--hfont);color:var(--color-text)">all</span> windows on the output.</div>
+        <div>Peach square = drag source pinned (phase 2).</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 06 SCROLL -->
+<div id="f6" style="width:820px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">06</span><h2 style="margin:0;font:500 18px var(--font-heading)">Scroll mode</h2></div>
+  <div style="display:flex;gap:16px">
+    <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+      <div style="position:relative;height:250px;background:#ffffff;border-radius:6px;overflow:hidden;border:1px solid #ccd0da">
+        <div style="position:absolute;left:0;right:0;top:0;height:28px;background:#e6e9ef"></div>
+        <div style="position:absolute;left:0;top:28px;width:96px;bottom:0;background:#f4f5f8;border-right:1px solid #dce0e8;display:flex;flex-direction:column;gap:10px;padding:12px 10px;box-sizing:border-box"><div style="height:4px;width:60px;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:48px;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:66px;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:40px;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:56px;background:#9ca0b0;border-radius:2px"></div></div>
+        <div style="position:absolute;left:112px;top:44px;right:16px;display:flex;flex-direction:column;gap:9px"><div style="height:7px;width:140px;background:#4c4f69;border-radius:2px"></div><div style="height:4px;width:100%;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:92%;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:96%;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:70%;background:#9ca0b0;border-radius:2px"></div></div>
+        <div style="position:absolute;left:112px;top:150px;right:16px;height:70px;background:#eff1f5;border-radius:4px;display:flex;flex-direction:column;gap:8px;padding:10px;box-sizing:border-box"><div style="height:4px;width:130%;background:#8839ef;opacity:.5;border-radius:2px"></div><div style="height:4px;width:110%;background:#40a02b;opacity:.5;border-radius:2px"></div></div>
+        <span style="position:absolute;left:4px;top:32px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">a</span>
+        <span style="position:absolute;left:100px;top:32px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">s</span>
+        <span style="position:absolute;left:116px;top:154px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">d</span>
+      </div>
+      <div style="font:400 12px/1.45 var(--font-body);color:var(--color-neutral-300)"><b style="font-weight:500;color:var(--color-text)">Pick container.</b> Only scrollable regions get hints, placed inside their top-left (+4, +4). One container on screen → skip straight to scrolling.</div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+      <div style="position:relative;height:250px;background:#ffffff;border-radius:6px;overflow:hidden;border:1px solid #ccd0da">
+        <div style="position:absolute;left:0;right:0;top:0;height:28px;background:#e6e9ef"></div>
+        <div style="position:absolute;left:0;top:28px;width:96px;bottom:0;background:#f4f5f8;border-right:1px solid #dce0e8;display:flex;flex-direction:column;gap:10px;padding:12px 10px;box-sizing:border-box"><div style="height:4px;width:60px;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:48px;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:66px;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:40px;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:56px;background:#9ca0b0;border-radius:2px"></div></div>
+        <div style="position:absolute;left:112px;top:20px;right:16px;display:flex;flex-direction:column;gap:9px"><div style="height:4px;width:96%;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:70%;background:#9ca0b0;border-radius:2px"></div><div style="height:7px;width:120px;background:#4c4f69;border-radius:2px;margin-top:20px"></div><div style="height:4px;width:100%;background:#9ca0b0;border-radius:2px"></div><div style="height:4px;width:88%;background:#9ca0b0;border-radius:2px"></div></div>
+        <div style="position:absolute;left:112px;top:126px;right:16px;height:70px;background:#eff1f5;border-radius:4px"></div>
+        <div style="position:absolute;left:97px;top:29px;right:1px;bottom:1px;border:2px solid var(--hs);border-radius:2px"></div>
+        <div style="position:absolute;right:4px;top:60px;width:3px;height:44px;border-radius:1.5px;background:var(--hs)"></div>
+        <div style="position:absolute;right:12px;top:35px;display:inline-flex;align-items:stretch;height:20px;box-sizing:border-box;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont)"><span style="display:flex;align-items:center;padding:0 5px;color:var(--hs)">↓</span><span style="display:flex;align-items:center;padding:0 5px;border-left:1px solid var(--hbd);color:var(--hd);font-weight:400">38%</span></div>
+      </div>
+      <div style="font:400 12px/1.45 var(--font-body);color:var(--color-neutral-300)"><b style="font-weight:500;color:var(--color-text)">Scrolling.</b> 2 px hint.scroll stroke inset 1 px around the container. 3 px position rail at the right edge (thumb = viewport / content). Tag shows last direction + position. Hints hidden; Esc or Tab re-picks.</div>
+    </div>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;font:400 12px var(--font-body);color:var(--color-neutral-300)">
+    <span>Chip while scrolling:</span>
+    <div style="display:inline-flex;align-items:stretch;height:22px;box-sizing:border-box;border:1px solid var(--hbd);border-radius:4px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont)"><span style="display:flex;align-items:center;padding:0 7px">scroll</span><span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--ha);letter-spacing:.2em">hjkl</span><span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--hd);font-weight:400;letter-spacing:.15em">←↓↑→</span><span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--hd);font-weight:400">focused</span></div>
+    <span style="color:var(--color-neutral-400)">No smooth-scroll animation from the overlay; the app scrolls itself.</span>
+  </div>
+</div>
+
+<!-- 07 DRAG -->
+<div id="f7" style="width:820px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">07</span><h2 style="margin:0;font:500 18px var(--font-heading)">Drag mode — phase 2, source pinned</h2></div>
+  <div style="position:relative;height:300px;background:#1f2023;border-radius:6px;overflow:hidden">
+    <div style="position:absolute;left:20px;top:20px;width:230px;height:260px;border-radius:6px;background:#2a2b2f"></div>
+    <div style="position:absolute;left:270px;top:20px;width:230px;height:260px;border-radius:6px;background:#2a2b2f"></div>
+    <div style="position:absolute;left:520px;top:20px;width:230px;height:260px;border-radius:6px;background:#2a2b2f"></div>
+    <div style="position:absolute;left:32px;top:30px;font:500 12px var(--font-body);color:#c8c8cc">To do</div>
+    <div style="position:absolute;left:282px;top:30px;font:500 12px var(--font-body);color:#c8c8cc">In progress</div>
+    <div style="position:absolute;left:532px;top:30px;font:500 12px var(--font-body);color:#c8c8cc">Done</div>
+    <div style="position:absolute;left:30px;top:58px;width:210px;height:50px;border-radius:5px;background:#37383d"></div>
+    <div style="position:absolute;left:30px;top:118px;width:210px;height:50px;border-radius:5px;background:#37383d"></div>
+    <div style="position:absolute;left:30px;top:178px;width:210px;height:50px;border-radius:5px;background:#37383d"></div>
+    <div style="position:absolute;left:280px;top:58px;width:210px;height:50px;border-radius:5px;background:#37383d"></div>
+    <div style="position:absolute;left:530px;top:58px;width:210px;height:50px;border-radius:5px;background:#37383d"></div>
+    <div style="position:absolute;left:530px;top:118px;width:210px;height:50px;border-radius:5px;background:#37383d"></div>
+    <div style="position:absolute;left:29px;top:117px;width:212px;height:52px;border:1px solid var(--hdb);border-radius:6px;box-sizing:border-box"></div>
+    <span style="position:absolute;left:27px;top:115px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hdb);border-radius:3px;background:var(--hdb);color:var(--hdf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">s</span>
+    <span style="position:absolute;left:17px;top:17px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">a</span>
+    <span style="position:absolute;left:267px;top:17px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">d</span>
+    <span style="position:absolute;left:517px;top:17px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">f</span>
+    <span style="position:absolute;left:27px;top:55px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">g</span>
+    <span style="position:absolute;left:27px;top:175px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">h</span>
+    <span style="position:absolute;left:277px;top:55px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">j</span>
+    <span style="position:absolute;left:527px;top:55px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">k</span>
+    <span style="position:absolute;left:527px;top:115px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">l</span>
+    <div style="position:absolute;right:12px;bottom:12px;display:inline-flex;align-items:stretch;height:22px;box-sizing:border-box;border:1px solid var(--hbd);border-radius:4px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont)"><span style="display:flex;align-items:center;gap:5px;padding:0 7px"><span style="width:7px;height:7px;border-radius:2px;background:var(--hdb)"></span>drag 2/2</span><span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--hd);font-weight:400">pick destination</span><span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--ha)"><span style="width:1px;height:11px;background:var(--ha)"></span></span><span style="display:flex;align-items:center;padding:0 7px;border-left:1px solid var(--hbd);color:var(--hd);font-weight:400">focused</span></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;font:400 12px/1.45 var(--font-body);color:var(--color-neutral-300)">
+    <div><b style="font-weight:500;color:var(--color-text)">Source</b> keeps its label, filled hint.drag_bg, plus a 1 px drag_bg outline on the target. It cannot be picked again.</div>
+    <div><b style="font-weight:500;color:var(--color-text)">Destinations</b> are re-labelled from scratch (fresh short labels), drawn in the idle style. The source label is excluded from the alphabet.</div>
+    <div><b style="font-weight:500;color:var(--color-text)">Esc</b> once returns to phase 1 with the old hints; twice exits. Release is a press → move → release at the destination centre.</div>
+  </div>
+</div>
+
+<!-- 08 COLOR -->
+<div id="f8" style="width:1180px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:20px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">08</span><h2 style="margin:0;font:500 18px var(--font-heading)">Colour tokens</h2><span style="font:400 12px var(--font-body);color:var(--color-neutral-400)">Catppuccin Mocha (dark, default) · Latte (light)</span></div>
+  <div style="display:flex;gap:28px;align-items:flex-start">
+    <div style="width:520px;display:flex;flex-direction:column">
+      <div style="display:grid;grid-template-columns:150px 1fr 1fr;gap:8px;padding:0 0 8px;font:400 11px var(--font-body);color:var(--color-neutral-500)"><span>token</span><span>mocha</span><span>latte</span></div>
+      <sc-for list="{{ tokenRows }}" as="t" hint-placeholder-count="14">
+        <div style="display:grid;grid-template-columns:150px 1fr 1fr;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--color-divider)">
+          <span style="font:500 12px var(--hfont);color:var(--color-text)">hint.{{ t.key }}</span>
+          <div style="display:flex;align-items:center;gap:8px"><span style="width:18px;height:18px;border-radius:4px;background:{{ t.m }};border:1px solid var(--color-divider);flex:none"></span><span style="font:400 11.5px var(--hfont);color:var(--color-neutral-200)">{{ t.m }}</span><span style="font:400 11px var(--font-body);color:var(--color-neutral-500)">{{ t.mn }}</span></div>
+          <div style="display:flex;align-items:center;gap:8px"><span style="width:18px;height:18px;border-radius:4px;background:{{ t.l }};border:1px solid var(--color-divider);flex:none"></span><span style="font:400 11.5px var(--hfont);color:var(--color-neutral-200)">{{ t.l }}</span><span style="font:400 11px var(--font-body);color:var(--color-neutral-500)">{{ t.ln }}</span></div>
+        </div>
+      </sc-for>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;gap:18px;min-width:0">
+      <div style="display:flex;flex-direction:column">
+        <div style="font:500 13px var(--font-body);padding-bottom:8px">Text contrast — WCAG AA ≥ 4.5:1</div>
+        <sc-for list="{{ textRows }}" as="r" hint-placeholder-count="6">
+          <div style="display:grid;grid-template-columns:1fr 130px 130px;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--color-divider);font:400 12px var(--font-body);color:var(--color-neutral-300)">
+            <span>{{ r.name }}</span>
+            <div style="display:flex;gap:8px;align-items:center"><span style="font:500 12px var(--hfont);color:var(--color-text)">{{ r.m }}</span><span class="{{ r.mCls }}">{{ r.mTag }}</span></div>
+            <div style="display:flex;gap:8px;align-items:center"><span style="font:500 12px var(--hfont);color:var(--color-text)">{{ r.l }}</span><span class="{{ r.lCls }}">{{ r.lTag }}</span></div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display:flex;flex-direction:column">
+        <div style="font:500 13px var(--font-body);padding-bottom:4px">Badge edge vs backdrop — non-text ≥ 3:1</div>
+        <div style="font:400 11.5px var(--font-body);color:var(--color-neutral-400);padding-bottom:8px">max(border, bg) against sampled backdrop colours. The opaque fill keeps the label at the ratios above on any backdrop.</div>
+        <sc-for list="{{ edgeRows }}" as="r" hint-placeholder-count="5">
+          <div style="display:grid;grid-template-columns:24px 1fr 130px 130px;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--color-divider);font:400 12px var(--font-body);color:var(--color-neutral-300)">
+            <span style="width:18px;height:18px;border-radius:4px;background:{{ r.hex }};border:1px solid var(--color-divider)"></span>
+            <span>{{ r.name }}</span>
+            <div style="display:flex;gap:8px;align-items:center"><span style="font:500 12px var(--hfont);color:var(--color-text)">{{ r.m }}</span><span class="{{ r.mCls }}">{{ r.mTag }}</span></div>
+            <div style="display:flex;gap:8px;align-items:center"><span style="font:500 12px var(--hfont);color:var(--color-text)">{{ r.l }}</span><span class="{{ r.lCls }}">{{ r.lTag }}</span></div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:10px">
+    <div style="font:500 13px var(--font-body)">Busy-backdrop test — idle · typed · flash · vision · drag · disabled</div>
+    <sc-for list="{{ themeTests }}" as="th" hint-placeholder-count="2">
+      <div style="{{ th.vars }}">
+        <div style="display:grid;grid-template-columns:90px 1fr 1fr 1fr;gap:8px;align-items:center">
+          <span style="font:500 12px var(--font-body);color:var(--color-neutral-300)">{{ th.name }}</span>
+          <div style="height:60px;border-radius:4px;background:#1e1e2e;display:flex;flex-direction:column;justify-content:center;gap:6px;padding:0 12px;position:relative;overflow:hidden"><div style="position:absolute;left:12px;top:8px;display:flex;flex-direction:column;gap:6px;opacity:.9"><div style="height:4px;width:90px;background:#f38ba8;border-radius:2px"></div><div style="height:4px;width:160px;background:#89b4fa;border-radius:2px"></div><div style="height:4px;width:120px;background:#a6e3a1;border-radius:2px"></div><div style="height:4px;width:200px;background:#f9e2af;border-radius:2px"></div><div style="height:4px;width:80px;background:#cdd6f4;border-radius:2px"></div><div style="height:4px;width:140px;background:#cba6f7;border-radius:2px"></div></div><div style="position:relative;display:flex;gap:6px">
+            <span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);font:700 11px/1 var(--hfont);text-transform:var(--hcase)"><span style="color:var(--hpm)">a</span><span style="color:var(--hpr)">d</span></span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hfb);border-radius:3px;background:var(--hfb);color:var(--hff);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">af</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px dashed var(--hv);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">jk</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hdb);border-radius:3px;background:var(--hdb);color:var(--hdf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">s</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hxb);border-radius:3px;background:var(--hxb);color:var(--hxf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">l</span></div></div>
+          <div style="height:60px;border-radius:4px;background:#ffffff;display:flex;flex-direction:column;justify-content:center;padding:0 12px;position:relative;overflow:hidden"><div style="position:absolute;left:12px;top:8px;display:flex;flex-direction:column;gap:6px"><div style="height:6px;width:150px;background:#202124;border-radius:2px"></div><div style="height:4px;width:220px;background:#5f6368;border-radius:2px"></div><div style="height:4px;width:180px;background:#5f6368;border-radius:2px"></div><div style="height:4px;width:70px;background:#1a73e8;border-radius:2px"></div><div style="height:4px;width:200px;background:#5f6368;border-radius:2px"></div></div><div style="position:relative;display:flex;gap:6px">
+            <span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);font:700 11px/1 var(--hfont);text-transform:var(--hcase)"><span style="color:var(--hpm)">a</span><span style="color:var(--hpr)">d</span></span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hfb);border-radius:3px;background:var(--hfb);color:var(--hff);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">af</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px dashed var(--hv);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">jk</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hdb);border-radius:3px;background:var(--hdb);color:var(--hdf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">s</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hxb);border-radius:3px;background:var(--hxb);color:var(--hxf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">l</span></div></div>
+          <div style="height:60px;border-radius:4px;background:url(assets/photo.jpg) 40% 45%/cover;display:flex;align-items:center;padding:0 12px"><div style="display:flex;gap:6px">
+            <span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">as</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);font:700 11px/1 var(--hfont);text-transform:var(--hcase)"><span style="color:var(--hpm)">a</span><span style="color:var(--hpr)">d</span></span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hfb);border-radius:3px;background:var(--hfb);color:var(--hff);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">af</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px dashed var(--hv);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">jk</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hdb);border-radius:3px;background:var(--hdb);color:var(--hdf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">s</span><span style="display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hxb);border-radius:3px;background:var(--hxb);color:var(--hxf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">l</span></div></div>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+</div>
+
+<!-- 09 LAYERS -->
+<div id="f9" style="width:1180px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">09</span><h2 style="margin:0;font:500 18px var(--font-heading)">Layer widgets &amp; screen edges</h2><span style="font:400 12px var(--font-body);color:var(--color-neutral-400)">scope +layers — 40 px top bar and a notification popup, 1:1 logical px</span></div>
+  <div style="display:flex;gap:40px;padding:12px 8px 0">
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div style="position:relative;width:440px;height:170px;background:#45475a;border-top:1px solid #f38ba8;border-left:1px solid #f38ba8">
+        <div style="position:absolute;left:0;top:0;right:0;height:40px;background:#181825"></div>
+        <div style="position:absolute;left:0;top:0;width:32px;height:40px;background:#313244;font:500 12px/40px var(--font-body);text-align:center;color:#cdd6f4">1</div>
+        <div style="position:absolute;left:32px;top:0;width:32px;height:40px;font:500 12px/40px var(--font-body);text-align:center;color:#7f849c">2</div>
+        <div style="position:absolute;left:64px;top:0;width:32px;height:40px;font:500 12px/40px var(--font-body);text-align:center;color:#7f849c">3</div>
+        <div style="position:absolute;left:96px;top:0;width:32px;height:40px;font:500 12px/40px var(--font-body);text-align:center;color:#7f849c">4</div>
+        <div style="position:absolute;left:140px;top:16px;height:6px;width:150px;background:#585b70;border-radius:2px"></div>
+        <span style="position:absolute;left:-3px;top:-3px;width:16px;height:17px;border:1px dashed #f38ba8;border-radius:3px;box-sizing:border-box"></span>
+        <span style="position:absolute;left:29px;top:-3px;width:16px;height:17px;border:1px dashed #f38ba8;border-radius:3px;box-sizing:border-box"></span>
+        <span style="position:absolute;left:1px;top:1px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">a</span>
+        <span style="position:absolute;left:33px;top:1px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">s</span>
+        <span style="position:absolute;left:65px;top:1px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">d</span>
+        <span style="position:absolute;left:97px;top:1px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">f</span>
+        <div style="position:absolute;left:150px;top:64px;width:270px;font:400 11.5px/1.45 var(--font-body);color:#cdd6f4">Workspace buttons sit flush at (0, 0). Preferred slot (−3, −3) — red ghost — is clamped to (1, 1). Clamping never moves a badge off its own target.</div>
+      </div>
+      <div style="font:400 11px var(--font-body);color:var(--color-neutral-500)">top-left of output · red line = screen edge</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div style="position:relative;width:640px;height:200px;background:#45475a;border-top:1px solid #f38ba8;border-right:1px solid #f38ba8">
+        <div style="position:absolute;left:0;top:0;right:0;height:40px;background:#181825"></div>
+        <div style="position:absolute;left:470px;top:6px;width:52px;height:28px;font:500 12px/28px var(--font-body);text-align:center;color:#cdd6f4">14:32</div>
+        <div style="position:absolute;left:534px;top:13px;width:14px;height:14px;border-radius:3px;background:#7f849c"></div>
+        <div style="position:absolute;left:564px;top:13px;width:14px;height:14px;border-radius:3px;background:#7f849c"></div>
+        <div style="position:absolute;left:594px;top:13px;width:14px;height:14px;border-radius:3px;background:#7f849c"></div>
+        <div style="position:absolute;left:626px;top:13px;width:14px;height:14px;border-radius:3px;background:#7f849c"></div>
+        <div style="position:absolute;left:328px;top:48px;width:300px;height:118px;border-radius:8px;background:#1e1e2e;border:1px solid #45475a;box-sizing:border-box">
+          <div style="position:absolute;left:12px;top:12px;width:28px;height:28px;border-radius:6px;background:#585b70"></div>
+          <div style="position:absolute;left:50px;top:14px;font:500 12px var(--font-body);color:#cdd6f4">Calendar</div>
+          <div style="position:absolute;left:50px;top:32px;height:4px;width:200px;background:#7f849c;border-radius:2px"></div>
+          <div style="position:absolute;left:276px;top:8px;width:16px;height:16px;font:400 13px/16px var(--font-body);text-align:center;color:#a6adc8">×</div>
+          <div style="position:absolute;left:12px;top:78px;width:70px;height:26px;border-radius:5px;background:#313244;font:500 11px/26px var(--font-body);text-align:center;color:#cdd6f4">Open</div>
+          <div style="position:absolute;left:90px;top:78px;width:80px;height:26px;border-radius:5px;background:#313244;font:500 11px/26px var(--font-body);text-align:center;color:#cdd6f4">Dismiss</div>
+        </div>
+        <span style="position:absolute;left:467px;top:3px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">ha</span>
+        <span style="position:absolute;left:530px;top:12px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">hs</span>
+        <span style="position:absolute;left:560px;top:12px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">hd</span>
+        <span style="position:absolute;left:590px;top:12px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">hf</span>
+        <span style="position:absolute;left:622px;top:12px;width:22px;height:17px;border:1px dashed #f38ba8;border-radius:3px;box-sizing:border-box"></span>
+        <span style="position:absolute;left:617px;top:12px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">hg</span>
+        <span style="position:absolute;left:325px;top:45px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">j</span>
+        <span style="position:absolute;left:597px;top:56px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">k</span>
+        <span style="position:absolute;left:337px;top:123px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">l</span>
+        <span style="position:absolute;left:415px;top:123px;display:flex;align-items:center;height:17px;box-sizing:border-box;padding:0 3px;border:1px solid var(--hbd);border-radius:3px;background:var(--hb);color:var(--hf);font:700 11px/1 var(--hfont);text-transform:var(--hcase)">g</span>
+      </div>
+      <div style="font:400 11px var(--font-body);color:var(--color-neutral-500)">top-right of output · last tray icon is flush right: centred 22 px badge would overhang 4 px → clamped to x = W − 1 − 22</div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:20px;font:400 12px/1.45 var(--font-body);color:var(--color-neutral-300)">
+    <div><b style="font-weight:500;color:var(--color-text)">Clamp</b> x to [out.x + 1, out.right − w − 1], y likewise, then re-run collision (rule 3). Clamped badges still overlap their target.</div>
+    <div><b style="font-weight:500;color:var(--color-text)">Overlay z-order</b>: woints' layer surface sits on the overlay layer, above top-layer bars and popups — badges are never clipped by the widgets they label.</div>
+    <div><b style="font-weight:500;color:var(--color-text)">Layer targets</b> get labels after window targets (longer labels), since bars are used less often than the focused app.</div>
+  </div>
+</div>
+
+<!-- 10 MULTI-MONITOR -->
+<div id="f10" style="width:820px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">10</span><h2 style="margin:0;font:500 18px var(--font-heading)">Multi-monitor, mixed scale</h2></div>
+  <div style="display:flex;gap:0;align-items:flex-start">
+    <div style="position:relative;width:384px;height:216px;border:1px solid var(--color-neutral-600);box-sizing:border-box;background:#1e1e2e">
+      <div style="position:absolute;left:12px;top:10px;font:500 12px var(--font-body);color:#cdd6f4">DP-1 · 1920×1080 · scale 1</div>
+      <div style="position:absolute;left:12px;top:28px;font:400 11px var(--font-body);color:#a6adc8">24″ · 92 ppi · logical 1920×1080</div>
+      <div style="position:absolute;left:12px;bottom:12px;font:400 11px var(--font-body);color:#7f849c">own layer surface, buffer scale 1</div>
+    </div>
+    <div style="position:relative;width:288px;height:180px;border:1px solid var(--color-neutral-600);border-left:none;box-sizing:border-box;background:#1e1e2e">
+      <div style="position:absolute;left:12px;top:10px;font:500 12px var(--font-body);color:#cdd6f4">eDP-1 · 2880×1800 · scale 2</div>
+      <div style="position:absolute;left:12px;top:28px;font:400 11px var(--font-body);color:#a6adc8">14″ · 243 ppi · logical 1440×900</div>
+      <div style="position:absolute;left:12px;bottom:12px;font:400 11px var(--font-body);color:#7f849c">own layer surface, buffer scale 2</div>
+    </div>
+  </div>
+  <div style="font:400 11px var(--font-body);color:var(--color-neutral-500)">Layout in logical px, drawn at 0.2×.</div>
+  <div style="display:flex;gap:24px;align-items:flex-start">
+    <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start">
+      <div style="padding:12px;background:#1e1e2e;border-radius:4px"><span style="display:flex;align-items:center;width:88px;height:68px;box-sizing:border-box;padding:0 12px;border:4px solid var(--hbd);border-radius:12px;background:var(--hb);color:var(--hf);font:700 44px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+      <div style="font:400 11px ui-monospace,monospace;color:var(--color-neutral-300)">DP-1: 22×17 device px<br>(shown ×4)</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start">
+      <div style="padding:12px;background:#1e1e2e;border-radius:4px"><span style="display:flex;align-items:center;width:88px;height:68px;box-sizing:border-box;padding:0 12px;border:4px solid var(--hbd);border-radius:12px;background:var(--hb);color:var(--hf);font:700 44px/1 var(--hfont);text-transform:var(--hcase)">as</span></div>
+      <div style="font:400 11px ui-monospace,monospace;color:var(--color-neutral-300)">eDP-1: 44×34 device px<br>(shown ×2)</div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;gap:8px;font:400 12px/1.45 var(--font-body);color:var(--color-neutral-300)">
+      <div>Each output gets its own layer surface rendered at its own scale (wp_fractional_scale_v1 + viewporter). Never render once at max scale and downsample.</div>
+      <div>Logical sizing assumes the compositor scale matches density. Here it doesn't quite: 11 px = <b style="font-weight:500;color:var(--color-text)">3.04 mm</b> on DP-1 vs <b style="font-weight:500;color:var(--color-text)">2.30 mm</b> on eDP-1.</div>
+      <div><span style="font-family:var(--hfont);color:var(--color-text)">hint.size_unit = "mm"</span> + <span style="font-family:var(--hfont);color:var(--color-text)">hint.size_mm = 3.0</span> uses wl_output physical size: DP-1 → 11 device px, eDP-1 → 29 device px (14.5 logical). Padding and radius scale by the same factor. Falls back to logical if the output reports 0 mm.</div>
+      <div>Hints never span outputs; a window crossing the seam is hinted on the output holding its target centre.</div>
+    </div>
+  </div>
+</div>
+
+<!-- 11 TOML -->
+<div id="f11" style="width:820px;background:var(--color-surface);border-radius:var(--radius-md);padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:14px">
+  <div style="display:flex;align-items:center;gap:10px"><span style="font:600 11px ui-monospace,monospace;color:var(--color-accent-300);padding:2px 6px;border:1px solid var(--color-accent-700);border-radius:4px">11</span><h2 style="margin:0;font:500 18px var(--font-heading);flex:1">config.toml</h2><button class="btn btn-secondary" onClick="{{ copyToml }}">{{ copyLabel }}</button></div>
+  <pre style="margin:0;padding:18px;background:var(--color-bg);border-radius:6px;font:400 12px/1.6 'Atkinson Hyperlegible Mono',ui-monospace,monospace;color:var(--color-neutral-200);white-space:pre;overflow:auto">{{ toml }}</pre>
+</div>
+
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;mocha&quot;,&quot;latte&quot;],&quot;default&quot;:&quot;mocha&quot;,&quot;tsType&quot;:&quot;'mocha'|'latte'&quot;,&quot;section&quot;:&quot;Overlay&quot;},&quot;uppercase&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Overlay&quot;},&quot;prefixStyle&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;highlight-matched&quot;,&quot;dim-matched&quot;],&quot;default&quot;:&quot;highlight-matched&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Overlay&quot;}}">
+const MOCHA = {bg:'#11111b',fg:'#cdd6f4',fg_dim:'#a6adc8',accent:'#cba6f7',border:'#6c7086',outline:'#b4befe',vision:'#94e2d5',flash_bg:'#a6e3a1',flash_fg:'#11111b',drag_bg:'#fab387',drag_fg:'#11111b',scroll:'#89b4fa',disabled_bg:'#181825',disabled_fg:'#6c7086'};
+const MOCHA_N = {bg:'crust',fg:'text',fg_dim:'subtext0',accent:'mauve',border:'overlay0',outline:'lavender',vision:'teal',flash_bg:'green',flash_fg:'crust',drag_bg:'peach',drag_fg:'crust',scroll:'blue',disabled_bg:'mantle',disabled_fg:'overlay0'};
+const LATTE = {bg:'#eff1f5',fg:'#4c4f69',fg_dim:'#5c5f77',accent:'#8839ef',border:'#7c7f93',outline:'#7287fd',vision:'#179299',flash_bg:'#40a02b',flash_fg:'#11111b',drag_bg:'#fe640b',drag_fg:'#11111b',scroll:'#1e66f5',disabled_bg:'#e6e9ef',disabled_fg:'#8c8fa1'};
+const LATTE_N = {bg:'base',fg:'text',fg_dim:'subtext1',accent:'mauve',border:'overlay2',outline:'lavender',vision:'teal',flash_bg:'green',flash_fg:'mocha crust',drag_bg:'peach',drag_fg:'mocha crust',scroll:'blue',disabled_bg:'mantle',disabled_fg:'overlay1'};
+const KEYS = Object.keys(MOCHA);
+const ALPHA = 'asdfghjkl';
+
+function lum(h){const n=parseInt(h.slice(1),16);const c=[n>>16&255,n>>8&255,n&255].map(v=>{v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4)});return .2126*c[0]+.7152*c[1]+.0722*c[2];}
+function cr(a,b){const x=lum(a),y=lum(b);return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);}
+function labels(n){
+  if(n<=ALPHA.length) return ALPHA.slice(0,n).split('');
+  let s=ALPHA.length-1; while(s>0 && s+(ALPHA.length-s)*ALPHA.length<n) s--;
+  const out=ALPHA.slice(0,s).split('');
+  for(const p of ALPHA.slice(s)) for(const c of ALPHA){ if(out.length<n) out.push(p+c); }
+  return out;
+}
+const bw = l => Math.ceil(l.length*6.6+8);
+function vars(t, upper, prefix){
+  const dim = prefix==='dim-matched';
+  return {'--hb':t.bg,'--hf':t.fg,'--hd':t.fg_dim,'--ha':t.accent,'--hbd':t.border,'--ho':t.outline,'--hv':t.vision,'--hfb':t.flash_bg,'--hff':t.flash_fg,'--hdb':t.drag_bg,'--hdf':t.drag_fg,'--hs':t.scroll,'--hxb':t.disabled_bg,'--hxf':t.disabled_fg,'--hpm':dim?t.fg_dim:t.accent,'--hpr':dim?t.fg:t.fg_dim,'--hcase':upper?'uppercase':'none'};
+}
+function fmt(r){return r.toFixed(1)+':1';}
+
+function buildToml(){
+  const L=[];
+  L.push('# woints — hint overlay','[hint]','font         = "Atkinson Hyperlegible Mono"','font_weight  = 700','size         = 11        # logical px, × output scale, rounded','min_size     = 10','size_unit    = "logical" # or "mm"','size_mm      = 3.0       # used when size_unit = "mm"','padding      = [2, 3]    # [y, x] logical px','radius       = 3','border_width = 1         # device px = max(1, floor(scale))','offset       = [-3, -3]  # from target top-left','gap          = 2         # min space between badges','center_below = 20        # targets smaller than this are centred','alphabet     = "asdfghjkl"','uppercase    = false','eliminated   = "hide"    # "hide" | "fade"','outline      = false','outline_width = 1','vision_dash  = [2, 2]','theme        = "mocha"   # "mocha" | "latte"','','[timing]','appear_ms = 0','fade_ms   = 60','flash_ms  = 80            # hard cap 120','','[chip]','corner = "bottom-right"','inset  = 12','height = 22','');
+  const pad = k => ('hint.'+k).padEnd(17);
+  L.push('[theme.mocha]   # Catppuccin Mocha'); KEYS.forEach(k=>L.push(`${pad(k)}= "${MOCHA[k]}"  # ${MOCHA_N[k]}`));
+  L.push('','[theme.latte]   # Catppuccin Latte'); KEYS.forEach(k=>L.push(`${pad(k)}= "${LATTE[k]}"  # ${LATTE_N[k]}`));
+  return L.join('\n');
+}
+
+class Component extends DCLogic {
+  state = { copied:false };
+  renderVals(){
+    const p=this.props, upper=!!p.uppercase, prefix=p.prefixStyle??'highlight-matched';
+    const T=(p.theme??'mocha')==='latte'?LATTE:MOCHA;
+
+    const scaleRows=[1,1.25,1.5,2].map(s=>{
+      const font=Math.round(11*s), py=Math.round(2*s), px=Math.round(3*s), rad=Math.round(3*s), b=Math.max(1,Math.floor(s));
+      const h=font+2*py+2*b, w=Math.ceil(2*0.6*font)+2*px+2*b, mf=Math.round(10*s);
+      const base={display:'inline-flex',alignItems:'center',boxSizing:'border-box',background:'var(--hb)',color:'var(--hf)',fontFamily:'var(--hfont)',fontWeight:700,lineHeight:1,textTransform:'var(--hcase)',border:`${b}px solid var(--hbd)`,borderRadius:rad+'px'};
+      const mh=mf+2*py+2*b;
+      return {s:s+'×',font:font+'px',pad:`${py}/${px}`,radius:rad,border:b,size:`${w}×${h}`,minFont:mf,
+        style:{...base,height:h+'px',padding:`0 ${px}px`,fontSize:font+'px'},
+        styleMin:{...base,height:mh+'px',padding:`0 ${px}px`,fontSize:mf+'px'}};
+    });
+
+    const la=labels(12);
+    const tbA={icons:[],badges:[]}; for(let i=0;i<12;i++){const x=16+24*i,y=18;tbA.icons.push({x,y});tbA.badges.push({x:x-3,y:y-3,label:la[i]});}
+    const tbB={icons:[],badges:[]}; for(let i=0;i<12;i++){const x=16+18*i,y=22;tbB.icons.push({x,y});tbB.badges.push({x:x-3,y:i%2?y+17:y-3-4,label:la[i]});}
+
+    const tabs={tabs:[],closes:[],badges:[]}; let x=10; const tl=labels(13); let li=0;
+    for(let i=0;i<2;i++){tabs.tabs.push({x,w:36,tw:0,bg:'#ccd0da'});tabs.badges.push({x:x-3,y:11,label:tl[li++]});x+=38;}
+    for(let i=0;i<5;i++){
+      tabs.tabs.push({x,w:130,tw:50+((i*23)%40),bg:i===1?'#eff1f5':'#ccd0da'});
+      tabs.badges.push({x:x-3,y:11,label:tl[li++]});
+      const cx=x+130-24; tabs.closes.push({x:cx});
+      const l=tl[li++]; tabs.badges.push({x:Math.round(cx+8-bw(l)/2),y:Math.round(31-8.5),label:l});
+      x+=132;
+    }
+    tabs.plusX=x+4; tabs.badges.push({x:x+1,y:14,label:tl[li++]});
+
+    const ll=labels(40); const list={rows:[],badges:[],h:40*20};
+    for(let i=0;i<40;i++){list.rows.push({y:i*20,w:60+((i*37)%120),bg:i===6?'#e6e9ef':'transparent'});list.badges.push({x:1,y:i*20+1.5,label:ll[i]});}
+
+    const chips=[['click'],['right-click'],['middle'],['double'],['hover'],['focus'],['drag 1/2',false,'pick source'],['drag 2/2',true,'pick destination'],['scroll',false,'hjkl ←↓↑→'],['copy-text']].map(([mode,pin,sub],i)=>({mode,pin:!!pin,sub:sub||'',buf:['','a','','s','','','','','',''][i]||'',scope:['focused','focused','+layers','focused','layers','all','focused','focused','focused','+layers'][i]}));
+
+    const tokenRows=KEYS.map(k=>({key:k,m:MOCHA[k],mn:MOCHA_N[k],l:LATTE[k],ln:LATTE_N[k]}));
+    const tag=(r,th,exempt)=>exempt?{t:'exempt',c:'tag tag-neutral'}:(r>=th?{t:th===3?'pass':'AA',c:'tag tag-accent'}:{t:'fail',c:'tag tag-outline'});
+    const textRows=[['Label','fg','bg'],['Matched glyph','accent','bg'],['Remaining glyph','fg_dim','bg'],['Flash','flash_fg','flash_bg'],['Drag source','drag_fg','drag_bg'],['Disabled','disabled_fg','disabled_bg',true]].map(([name,a,b,ex])=>{
+      const m=cr(MOCHA[a],MOCHA[b]), l=cr(LATTE[a],LATTE[b]), mt=tag(m,4.5,ex), lt=tag(l,4.5,ex);
+      return {name,m:fmt(m),l:fmt(l),mTag:mt.t,mCls:mt.c,lTag:lt.t,lCls:lt.c};
+    });
+    const edgeRows=[['Code editor (Mocha base)','#1e1e2e'],['White web page','#ffffff'],['Photo — shadows','#1a1714'],['Photo — mid-tones','#8a7a66'],['Photo — highlights','#e8e0d0']].map(([name,hex])=>{
+      const e=t=>Math.max(cr(t.border,hex),cr(t.bg,hex)); const m=e(MOCHA), l=e(LATTE), mt=tag(m,3), lt=tag(l,3);
+      return {name:name+' '+hex,hex,m:fmt(m),l:fmt(l),mTag:mt.t,mCls:mt.c,lTag:lt.t,lCls:lt.c};
+    });
+    const themeTests=[{name:'Mocha',vars:vars(MOCHA,upper,prefix)},{name:'Latte',vars:vars(LATTE,upper,prefix)}];
+
+    const toml=buildToml();
+    return {
+      rootVars:vars(T,upper,prefix), scaleRows, tbA, tbB, tabs, list, chips, tokenRows, textRows, edgeRows, themeTests, toml,
+      prefixNote: prefix==='dim-matched' ? 'Buffer "a". Vimium-style: matched glyphs → fg_dim, remaining glyphs → fg (the next key reads loudest).' : 'Buffer "a". Matched glyphs → accent, remaining glyphs → fg_dim. Non-matching badges are eliminated.',
+      copyLabel: this.state.copied?'Copied':'Copy TOML',
+      copyToml: ()=>{ navigator.clipboard?.writeText(toml); this.setState({copied:true}); setTimeout(()=>this.setState({copied:false}),1500); }
+    };
+  }
+}
+</script>
+</body>
+</html>
