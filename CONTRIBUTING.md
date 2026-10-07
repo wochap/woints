@@ -1,6 +1,6 @@
 # Contributing
 
-woints is licensed under Apache-2.0 (`LICENSE`).
+woints is licensed under MIT (`LICENSE`).
 
 - MIT or Apache-2.0 prior art (e.g. computer-use-linux) may be adapted with
   attribution.

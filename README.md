@@ -337,7 +337,7 @@ them:
 | OpenDILabCommunity/webpage_element_detection | Apache-2.0 card; YOLOv8 (AGPL) derivation | https://huggingface.co/OpenDILabCommunity/webpage_element_detection | web pages only; provenance unclear; not recommended |
 | Roboflow RF-DETR (base) | Apache-2.0 | https://github.com/roboflow/rf-detr | permissive, but no GUI finetune exists; candidate for a future own finetune |
 
-Only models whose weights license is compatible with Apache-2.0 will ever
+Only models whose weights license is compatible with MIT will ever
 be recommended here.
 
 Latency, `woints bench -n 20` with the ONNX detector at 640×640 on CPU:
@@ -405,4 +405,4 @@ Font License 1.1 (`crates/overlay/assets/OFL.txt`).
 
 ## License
 
-Apache-2.0 (`LICENSE`). See `CONTRIBUTING.md` for the prior-art rule.
+MIT (`LICENSE`). See `CONTRIBUTING.md` for the prior-art rule.

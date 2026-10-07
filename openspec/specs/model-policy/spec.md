@@ -27,7 +27,7 @@ The detector SHALL read `input_size`, `normalization`, `class_names` and `output
 - **THEN** doctor prints `model license: Apache License ... (LICENSE)`
 
 ### Requirement: README recommendation rule
-README SHALL list candidate detectors with license, source URL and verdict, and SHALL only recommend models whose weights license is compatible with the project's Apache-2.0 license. AGPL-3.0 weights (Ultralytics YOLO derivatives, OmniParser `icon_detect`) SHALL be listed as "usable locally by the user, not recommended, not redistributed".
+README SHALL list candidate detectors with license, source URL and verdict, and SHALL only recommend models whose weights license is compatible with the project's MIT license. AGPL-3.0 weights (Ultralytics YOLO derivatives, OmniParser `icon_detect`) SHALL be listed as "usable locally by the user, not recommended, not redistributed".
 
 #### Scenario: License matrix present
 - **WHEN** a reader opens README's "ONNX detector" section

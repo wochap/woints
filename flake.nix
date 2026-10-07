@@ -56,7 +56,7 @@
             '';
           meta = {
             description = "Keyboard hints for Hyprland";
-            license = pkgs.lib.licenses.asl20;
+            license = pkgs.lib.licenses.mit;
             mainProgram = "woints";
             platforms = pkgs.lib.platforms.linux;
           };
