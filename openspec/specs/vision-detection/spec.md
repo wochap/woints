@@ -61,3 +61,14 @@ Detector scratch buffers SHALL be reused between frames of equal size. All detec
 #### Scenario: Headless test run
 - **WHEN** `cargo test -p woints-vision` runs with no `WAYLAND_DISPLAY`
 - **THEN** all detector and merge tests pass
+
+### Requirement: Detector chain selection
+`vision.detector` SHALL accept `"classical"` (default), `"onnx"` and `"onnx+classical"`. For `"onnx+classical"` both detectors run on the same frame (ONNX first), their boxes are unioned and merged by the M4 IoU merge with ONNX boxes winning ties; `confidence` is kept per source.
+
+#### Scenario: Union then merge
+- **WHEN** ONNX returns a box `A` and classical returns a box `B` with `IoU(A,B) = 0.7` and `merge.iou = 0.5`
+- **THEN** the result contains `A` only, with `source = Vision(Onnx)`
+
+#### Scenario: ONNX unavailable at runtime
+- **WHEN** `vision.detector = "onnx+classical"` and the ONNX detector is disabled (missing model)
+- **THEN** the classical detector still runs and `status` shows `detector: classical (onnx unavailable)`

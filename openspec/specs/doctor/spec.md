@@ -40,3 +40,14 @@ README SHALL contain a toolkit enablement table with the fix per toolkit and a c
 #### Scenario: Table present
 - **WHEN** README is read
 - **THEN** every toolkit above has a row with a status column
+
+### Requirement: ONNX doctor section
+`woints doctor` SHALL print an `onnx` section: build has feature yes/no; configured detector; model path exists; input shape and output names read from the model; EP requested vs active; warm-up time; license file line; and, when the model lacks metadata, the exact config keys needed.
+
+#### Scenario: Feature absent
+- **WHEN** the running `wointsd` was built without `onnx`
+- **THEN** doctor prints `onnx: not compiled in (build with --features woints-vision/onnx or nix build .#woints-onnx)` and nothing else in the section
+
+#### Scenario: Model present on CPU
+- **WHEN** the model loads on CPU
+- **THEN** doctor prints `model: <path> ok`, `input: [1,3,640,640]`, `ep: cpu (requested cpu)`, `warmup: <n> ms`, and the license line or `license: not found (warning)`

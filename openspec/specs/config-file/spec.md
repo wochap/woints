@@ -29,3 +29,31 @@ The daemon SHALL reload on `SIGHUP` and on the `reload` protocol command. On suc
 #### Scenario: Invalid reload
 - **WHEN** the file is edited to an invalid value and `woints reload` runs
 - **THEN** the reply is `{"ok":false,"error":"<key>: <message>"}` and the previous config remains in effect
+
+### Requirement: ONNX config table
+`config.toml` SHALL accept:
+```toml
+[vision]
+detector = "classical"          # "classical" | "onnx" | "onnx+classical"
+
+[vision.onnx]
+model_path       = "~/.local/share/woints/models/ui.onnx"
+ep               = "cpu"        # "cpu" | "cuda" | "migraphx"
+threads          = 0            # 0 = auto
+min_confidence   = 0.35
+nms_iou          = 0.5
+input_size       = [640, 640]   # override metadata
+class_names      = []           # override metadata
+interactive_classes = []        # empty = all classes
+normalization    = { scale = 0.00392156, mean = [0,0,0], std = [1,1,1] }
+output_format    = "auto"       # "auto" | "yolo" | "detr"
+```
+Unknown keys SHALL warn; `~` SHALL expand; the table SHALL reload on SIGHUP.
+
+#### Scenario: SIGHUP changes threshold only
+- **WHEN** `min_confidence` changes and SIGHUP is sent
+- **THEN** the new threshold applies to the next request without rebuilding the session
+
+#### Scenario: SIGHUP changes model path
+- **WHEN** `model_path` changes and SIGHUP is sent
+- **THEN** the session is rebuilt and warm-up runs again, logged as `onnx: reloaded`
