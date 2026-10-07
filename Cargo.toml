@@ -16,6 +16,7 @@ woints-overlay = { path = "crates/overlay" }
 woints-a11y = { path = "crates/a11y" }
 woints-vision = { path = "crates/vision" }
 woints-input = { path = "crates/input" }
+woints-qs = { path = "crates/qs" }
 
 anyhow = "1"
 atspi-common = { version = "0.14", default-features = false, features = ["zbus"] }
@@ -29,6 +30,8 @@ serde_json = "1"
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop", "xkbcommon"] }
 thiserror = "2"
 tiny-skia = "0.11"
+toml = "1"
+xkbcommon = { version = "0.7", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

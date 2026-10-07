@@ -64,6 +64,8 @@ pub struct Monitor {
     pub focused: bool,
     pub disabled: bool,
     pub active_workspace: WorkspaceRef,
+    /// `id` 0 when no special workspace is shown.
+    pub special_workspace: WorkspaceRef,
 }
 
 impl Monitor {
@@ -157,6 +159,32 @@ pub struct LayerEntry {
 #[serde(default)]
 struct LayersMonitor {
     levels: BTreeMap<String, Vec<Layer>>,
+}
+
+/// One keyboard from `devices`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Keyboard {
+    pub name: String,
+    pub rules: String,
+    pub model: String,
+    /// Comma-separated layouts.
+    pub layout: String,
+    pub variant: String,
+    pub options: String,
+    pub active_layout_index: u32,
+    pub active_keymap: String,
+    pub main: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Devices {
+    keyboards: Vec<Keyboard>,
+}
+
+pub fn parse_keyboards(s: &str) -> std::result::Result<Vec<Keyboard>, serde_json::Error> {
+    serde_json::from_str::<Devices>(s).map(|d| d.keyboards)
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -258,6 +286,14 @@ impl Hypr {
         let s = self.request("j/layers").await?;
         parse_layers(&s).map_err(|source| Error::Parse {
             cmd: "layers".into(),
+            source,
+        })
+    }
+
+    pub async fn keyboards(&self) -> Result<Vec<Keyboard>> {
+        let s = self.request("j/devices").await?;
+        parse_keyboards(&s).map_err(|source| Error::Parse {
+            cmd: "devices".into(),
             source,
         })
     }
@@ -377,12 +413,59 @@ impl EventStream {
     }
 }
 
-/// [`TargetSelector`] backed by Hyprland. Only [`Scope::Focused`] in M1.
-#[derive(Debug, Clone)]
-pub struct HyprSelector {
-    pub hypr: Hypr,
-    pub outputs: Vec<OutputGeom>,
-    pub focused_output: Option<OutputId>,
+/// Hyprland state one selection works on.
+#[derive(Debug, Clone, Default)]
+pub struct HyprSnapshot {
+    pub monitors: Vec<Monitor>,
+    pub active: Option<Client>,
+    /// Queried only for [`Scope::All`].
+    pub clients: Vec<Client>,
+    /// Queried only for scopes with layers.
+    pub layers: Vec<LayerEntry>,
+}
+
+impl HyprSnapshot {
+    pub fn outputs(&self) -> Vec<OutputGeom> {
+        self.monitors
+            .iter()
+            .filter(|m| !m.disabled)
+            .map(Monitor::geom)
+            .collect()
+    }
+
+    pub fn focused_output(&self) -> Option<OutputId> {
+        self.monitors
+            .iter()
+            .find(|m| m.focused && !m.disabled)
+            .map(|m| OutputId(m.name.clone()))
+    }
+}
+
+/// Layer filtering from `[scope]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerFilter {
+    /// Hyprland level indices (0 background … 3 overlay).
+    pub levels: Vec<u8>,
+    pub ignore: Vec<String>,
+}
+
+impl Default for LayerFilter {
+    fn default() -> Self {
+        Self {
+            levels: vec![1, 2, 3],
+            ignore: Vec::new(),
+        }
+    }
+}
+
+impl LayerFilter {
+    pub fn keeps(&self, e: &LayerEntry) -> bool {
+        self.levels.contains(&e.level)
+            && !self.ignore.contains(&e.layer.namespace)
+            // 1×1 surfaces are protocol placeholders.
+            && e.layer.w > 1
+            && e.layer.h > 1
+    }
 }
 
 /// Build the focused-window target, choosing its output by centre containment.
@@ -399,20 +482,119 @@ pub fn focused_target(win: &Client, outputs: &[OutputGeom], focused: Option<&Out
     }
 }
 
+pub fn layer_target(e: &LayerEntry) -> Target {
+    Target {
+        surface: Surface::Layer {
+            address: e.layer.address.clone(),
+            namespace: e.layer.namespace.clone(),
+        },
+        rect: e.layer.rect(),
+        output: OutputId(e.monitor.clone()),
+        pid: u32::try_from(e.layer.pid).ok().filter(|&p| p > 0),
+        class: e.layer.namespace.clone(),
+    }
+}
+
+/// Clients on each monitor's active workspace or its shown special
+/// workspace, mapped and not hidden.
+pub fn visible_clients<'a>(clients: &'a [Client], monitors: &[Monitor]) -> Vec<&'a Client> {
+    clients
+        .iter()
+        .filter(|c| c.mapped && !c.hidden)
+        .filter(|c| {
+            monitors.iter().any(|m| {
+                !m.disabled
+                    && m.id == c.monitor
+                    && (c.workspace.id == m.active_workspace.id
+                        || (m.special_workspace.id != 0
+                            && c.workspace.id == m.special_workspace.id))
+            })
+        })
+        .collect()
+}
+
+/// Resolve `scope` into targets: toplevels first (the focused one leading),
+/// then layers.
+pub fn select_targets(snap: &HyprSnapshot, scope: Scope, filter: &LayerFilter) -> Vec<Target> {
+    let outputs = snap.outputs();
+    let focused = snap.focused_output();
+    let mut targets: Vec<Target> = match scope {
+        Scope::Focused | Scope::FocusedAndLayers => snap
+            .active
+            .iter()
+            .map(|w| focused_target(w, &outputs, focused.as_ref()))
+            .collect(),
+        Scope::Layers => Vec::new(),
+        Scope::All => {
+            let active = snap.active.as_ref().map(|a| a.address.as_str());
+            let mut v = visible_clients(&snap.clients, &snap.monitors);
+            v.sort_by_key(|c| Some(c.address.as_str()) != active);
+            v.into_iter()
+                .map(|c| focused_target(c, &outputs, focused.as_ref()))
+                .collect()
+        }
+    };
+    let layer_output = match scope {
+        Scope::Focused => return targets,
+        Scope::FocusedAndLayers => Some(
+            targets
+                .first()
+                .map(|t| t.output.clone())
+                .or(focused)
+                .unwrap_or_else(|| OutputId(String::new())),
+        ),
+        Scope::Layers | Scope::All => None,
+    };
+    let live: Vec<&str> = outputs.iter().map(|o| o.id.0.as_str()).collect();
+    targets.extend(
+        snap.layers
+            .iter()
+            .filter(|e| filter.keeps(e) && live.contains(&e.monitor.as_str()))
+            .filter(|e| layer_output.as_ref().is_none_or(|o| o.0 == e.monitor))
+            .map(layer_target),
+    );
+    targets
+}
+
+/// [`TargetSelector`] backed by Hyprland.
+#[derive(Debug, Clone)]
+pub struct HyprSelector {
+    pub hypr: Hypr,
+    pub filter: LayerFilter,
+}
+
+impl Hypr {
+    /// Query what `scope` needs for selection.
+    pub async fn snapshot(&self, scope: Scope) -> Result<HyprSnapshot> {
+        let monitors = self.monitors().await?;
+        let active = self.active_window().await?;
+        let clients = if scope == Scope::All {
+            self.clients().await?
+        } else {
+            Vec::new()
+        };
+        let layers = if scope == Scope::Focused {
+            Vec::new()
+        } else {
+            self.layers().await?
+        };
+        Ok(HyprSnapshot {
+            monitors,
+            active,
+            clients,
+            layers,
+        })
+    }
+}
+
 impl TargetSelector for HyprSelector {
     async fn select(&self, scope: Scope) -> std::result::Result<Vec<Target>, SelectError> {
-        if scope != Scope::Focused {
-            return Err(SelectError::Unsupported(scope));
-        }
-        let win = self
+        let snap = self
             .hypr
-            .active_window()
+            .snapshot(scope)
             .await
             .map_err(|e| SelectError::Backend(e.to_string()))?;
-        Ok(win
-            .into_iter()
-            .map(|w| focused_target(&w, &self.outputs, self.focused_output.as_ref()))
-            .collect())
+        Ok(select_targets(&snap, scope, &self.filter))
     }
 }
 
@@ -446,6 +628,7 @@ mod tests {
         assert!(e.focused);
         assert_eq!(e.physical_width, 310);
         assert_eq!(e.active_workspace.id, 8);
+        assert_eq!(e.special_workspace.id, 0);
     }
 
     #[test]
@@ -585,6 +768,149 @@ mod tests {
         assert_eq!(t.output, OutputId("B".into()));
         assert_eq!(t.pid, Some(7));
         assert_eq!(t.rect, Rect::new(2000, 100, 400, 300));
+    }
+
+    fn fixture_snapshot() -> HyprSnapshot {
+        HyprSnapshot {
+            monitors: parse_monitors(MONITORS).unwrap(),
+            active: parse_active_window(ACTIVE).unwrap(),
+            clients: parse_clients(CLIENTS).unwrap(),
+            layers: parse_layers(LAYERS).unwrap(),
+        }
+    }
+
+    fn filter() -> LayerFilter {
+        LayerFilter {
+            levels: vec![1, 2, 3],
+            ignore: vec!["awww-daemon".into(), "wayland-pipewire-idle-inhibit".into()],
+        }
+    }
+
+    fn namespaces(ts: &[Target]) -> Vec<&str> {
+        ts.iter()
+            .filter_map(|t| match &t.surface {
+                Surface::Layer { namespace, .. } => Some(namespace.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn layer_targets_from_fixture() {
+        let s = fixture_snapshot();
+        let t = select_targets(&s, Scope::Layers, &filter());
+        assert_eq!(
+            namespaces(&t),
+            ["quickshell:bar", "quickshell:notifications-popups"]
+        );
+        assert!(t.iter().all(|t| t.surface.is_layer()));
+        let bar = &t[0];
+        assert_eq!(bar.rect, Rect::new(0, 0, 1440, 80));
+        assert_eq!(bar.output, OutputId("eDP-1".into()));
+        assert_eq!(bar.pid, Some(574865));
+        // `top`/`overlay` only: the bar lives on `bottom`.
+        let top = LayerFilter {
+            levels: vec![2, 3],
+            ..filter()
+        };
+        assert_eq!(
+            namespaces(&select_targets(&s, Scope::Layers, &top)),
+            ["quickshell:notifications-popups"]
+        );
+    }
+
+    #[test]
+    fn placeholder_skipped_even_when_not_ignored() {
+        let s = fixture_snapshot();
+        let f = LayerFilter {
+            levels: vec![0, 1, 2, 3],
+            ignore: vec!["awww-daemon".into()],
+        };
+        let t = select_targets(&s, Scope::Layers, &f);
+        assert!(!namespaces(&t).contains(&"wayland-pipewire-idle-inhibit"));
+    }
+
+    #[test]
+    fn scopes() {
+        let s = fixture_snapshot();
+        let f = filter();
+        let focused = select_targets(&s, Scope::Focused, &f);
+        assert_eq!(focused.len(), 1);
+        assert!(!focused[0].surface.is_layer());
+        let fl = select_targets(&s, Scope::FocusedAndLayers, &f);
+        assert_eq!(fl.len(), 3);
+        assert_eq!(fl[0], focused[0]);
+        // Fixture monitor shows workspace 8, special hidden: one footclient.
+        let all = select_targets(&s, Scope::All, &f);
+        let tops: Vec<_> = all.iter().filter(|t| !t.surface.is_layer()).collect();
+        assert_eq!(tops.len(), 1);
+        assert_eq!(tops[0].class, "footclient");
+    }
+
+    #[test]
+    fn all_two_monitors_and_special() {
+        let mon = |id: i64, name: &str, x: i32, ws: i64, special: i64| Monitor {
+            id,
+            name: name.into(),
+            x,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            focused: id == 0,
+            active_workspace: WorkspaceRef {
+                id: ws,
+                name: ws.to_string(),
+            },
+            special_workspace: WorkspaceRef {
+                id: special,
+                name: String::new(),
+            },
+            ..Default::default()
+        };
+        let client = |addr: &str, monitor: i64, ws: i64, x: i32, floating: bool| Client {
+            address: addr.into(),
+            mapped: true,
+            at: [x, 0],
+            size: [800, 600],
+            workspace: WorkspaceRef {
+                id: ws,
+                name: String::new(),
+            },
+            floating,
+            monitor,
+            class: addr.into(),
+            ..Default::default()
+        };
+        let mut s = HyprSnapshot {
+            monitors: vec![mon(0, "A", 0, 1, 0), mon(1, "B", 1920, 3, 0)],
+            active: Some(client("a2", 0, 1, 900, false)),
+            clients: vec![
+                client("a1", 0, 1, 0, false),
+                client("a2", 0, 1, 900, false),
+                client("b1", 1, 3, 2000, true),
+                client("hidden-ws", 0, 2, 0, false),
+                client("sp", 0, -98, 100, true),
+            ],
+            layers: vec![],
+        };
+        let all = select_targets(&s, Scope::All, &filter());
+        let classes: Vec<_> = all.iter().map(|t| t.class.as_str()).collect();
+        assert_eq!(classes, ["a2", "a1", "b1"]);
+        assert_eq!(all[2].output, OutputId("B".into()));
+        s.monitors[0].special_workspace.id = -98;
+        assert_eq!(select_targets(&s, Scope::All, &filter()).len(), 4);
+        s.clients[0].hidden = true;
+        assert_eq!(select_targets(&s, Scope::All, &filter()).len(), 3);
+    }
+
+    #[test]
+    fn keyboards() {
+        let k = parse_keyboards(
+            r#"{"mice":[],"keyboards":[{"name":"kb","layout":"us,ru","variant":"colemak_dh,","active_layout_index":0,"main":true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(k[0].layout, "us,ru");
+        assert!(k[0].main);
     }
 
     async fn dispatch_reply(reply: &'static str) -> Result<()> {

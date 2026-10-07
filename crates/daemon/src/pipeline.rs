@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use tracing::Instrument;
 
+use woints_core::config::Config;
 use woints_core::geom::{
     OutputGeom, OutputId, Rect, WindowGeom, WindowLocal, global_to_output, output_to_global,
     window_to_global,
@@ -19,7 +20,8 @@ use woints_core::ports::{
 };
 use woints_core::theme::Theme;
 use woints_core::vision::VisionReport;
-use woints_hypr::{Client, focused_target};
+use woints_hypr::{HyprSnapshot, LayerFilter, select_targets};
+use woints_qs::{LayerCollect, QuickshellIpcProvider};
 
 /// Time one provider may spend on one target (design D17).
 pub const PROVIDER_BUDGET: Duration = Duration::from_millis(60);
@@ -35,6 +37,81 @@ pub struct Output {
     pub timings: Timings,
     pub reports: Vec<CollectReport>,
     pub vision: VisionReport,
+    /// Per element: it belongs to a layer target.
+    pub layer: Vec<bool>,
+}
+
+/// Collects elements for layer targets, all at once (one `qs` call per
+/// instance, not per layer).
+pub trait LayerSource: Sync {
+    fn collect_layers(
+        &self,
+        targets: &[&Target],
+        budget: Budget,
+    ) -> impl Future<Output = LayerCollect> + Send;
+}
+
+/// Quickshell provider disabled: layers get vision only.
+pub struct NoLayers;
+
+impl LayerSource for NoLayers {
+    async fn collect_layers(&self, targets: &[&Target], _: Budget) -> LayerCollect {
+        LayerCollect {
+            per_target: targets
+                .iter()
+                .map(|_| Collected {
+                    report: CollectReport {
+                        provider: "quickshell".into(),
+                        reasons: vec!["disabled".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .collect(),
+            timings: Timings::default(),
+        }
+    }
+}
+
+impl LayerSource for QuickshellIpcProvider {
+    async fn collect_layers(&self, targets: &[&Target], budget: Budget) -> LayerCollect {
+        QuickshellIpcProvider::collect_layers(self, targets, budget).await
+    }
+}
+
+/// `all` scope stacking assumption (design D14): floating windows sit above
+/// tiled ones. Drops elements of tiled targets fully covered by a floating
+/// target on the same output; returns how many were dropped.
+pub fn cull_under_floating(
+    per_target: &mut [Vec<Element>],
+    targets: &[Target],
+    floating: &[bool],
+) -> usize {
+    let mut culled = 0;
+    for i in 0..targets.len() {
+        if targets[i].surface.is_layer() || floating[i] {
+            continue;
+        }
+        let covers: Vec<Rect<woints_core::geom::Global>> = (0..targets.len())
+            .filter(|&j| {
+                floating[j]
+                    && !targets[j].surface.is_layer()
+                    && targets[j].output == targets[i].output
+            })
+            .map(|j| targets[j].rect)
+            .collect();
+        if covers.is_empty() {
+            continue;
+        }
+        let before = per_target[i].len();
+        per_target[i].retain(|e| {
+            !covers
+                .iter()
+                .any(|c| c.intersection_area(&e.rect) == e.rect.area())
+        });
+        culled += before - per_target[i].len();
+    }
+    culled
 }
 
 /// The vision fallback as the pipeline sees it (design D18): a policy
@@ -79,17 +156,18 @@ pub struct Vision {
 
 #[cfg(feature = "vision")]
 impl Vision {
-    pub fn new(link: woints_overlay::CaptureLink, config: &woints_core::config::Config) -> Self {
+    pub fn new(link: woints_overlay::CaptureLink, config: &Config) -> Self {
+        let vision = config.vision_config();
         let capture = woints_vision::CompositeCapture {
             toplevel: woints_overlay::ToplevelExportCapture(link.clone()),
             region: woints_overlay::ScreencopyRegionCapture(link),
-            timeout: Duration::from_millis(config.vision.budget_ms),
+            timeout: Duration::from_millis(vision.budget_ms),
         };
         Self {
             provider: woints_vision::VisionProvider::new(
                 capture,
                 Box::new(woints_vision::ClassicalDetector::new()),
-                config.vision.clone(),
+                vision,
             ),
             merge: config.merge,
         }
@@ -120,13 +198,6 @@ impl VisionStage for Vision {
     fn merge_params(&self) -> MergeParams {
         self.merge
     }
-}
-
-/// Inputs gathered by the `hypr.query` stage.
-pub struct HyprState {
-    pub outputs: Vec<OutputGeom>,
-    pub focused_output: Option<OutputId>,
-    pub active: Option<Client>,
 }
 
 /// Demo provider: five boxes at the focused window's corners and centre.
@@ -235,6 +306,7 @@ pub fn set_chip(scene: &mut Scene, mode: &str, sub: Option<&str>, swatch: bool) 
 pub fn second_scene(
     first: &Scene,
     elements: &[Element],
+    layer: &[bool],
     source: usize,
     source_label: &str,
     targets: &[Target],
@@ -255,9 +327,16 @@ pub fn second_scene(
         .filter(|(i, _)| *i != source)
         .map(|(_, e)| e.clone())
         .collect();
+    let rest_layer: Vec<bool> = layer
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != source)
+        .map(|(_, l)| *l)
+        .collect();
     let mut timings = Timings::default();
     let (mut scene, rest_labels) = build_scene(
         &rest,
+        &rest_layer,
         targets,
         &first.outputs,
         focused_output,
@@ -296,6 +375,7 @@ fn stage<T>(timings: &mut Timings, name: &str, started: Instant, v: T) -> T {
 /// Label and place `elements`, producing the scene to draw.
 pub fn build_scene(
     elements: &[Element],
+    layer: &[bool],
     targets: &[Target],
     outputs: &[OutputGeom],
     focused_output: Option<&OutputId>,
@@ -312,9 +392,10 @@ pub fn build_scene(
         .unwrap_or(woints_core::Point::new(0, 0));
     let items: Vec<PriorityItem> = elements
         .iter()
-        .map(|e| PriorityItem {
+        .enumerate()
+        .map(|(i, e)| PriorityItem {
             rect: e.rect,
-            is_layer: false,
+            is_layer: layer.get(i).copied().unwrap_or(false),
         })
         .collect();
     let order = priority(&items, focus);
@@ -425,73 +506,110 @@ pub fn filter_scene(
 }
 
 /// Run select → collect → label → place on already queried Hyprland state.
-/// With `action`, only elements [`hintable`] for it are kept.
-/// `render`/`commit` are the caller's (they need the overlay or a renderer).
-pub async fn run<P: ElementProvider + Sync, V: VisionStage>(
-    hypr: HyprState,
+/// Toplevels go to `provider`, layers to `layers`, concurrently. With
+/// `action`, only elements [`hintable`] for it are kept. `render`/`commit`
+/// are the caller's (they need the overlay or a renderer).
+#[allow(clippy::too_many_arguments)]
+pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
+    snap: HyprSnapshot,
     scope: Scope,
     action: Option<Action>,
+    config: &Config,
     theme: &Theme,
     mut timings: Timings,
     provider: &P,
+    layers: &L,
     vision: &V,
 ) -> Result<Output, SelectError> {
     // select
     let t = Instant::now();
-    if scope != Scope::Focused {
-        return Err(SelectError::Unsupported(scope));
-    }
-    let targets: Vec<Target> = hypr
-        .active
-        .iter()
-        .map(|w| focused_target(w, &hypr.outputs, hypr.focused_output.as_ref()))
-        .collect();
+    let filter = LayerFilter {
+        levels: config.scope.levels.iter().map(|l| l.index()).collect(),
+        ignore: config.scope.ignore_layers.clone(),
+    };
+    let mut targets = select_targets(&snap, scope, &filter);
+    targets.retain(|t| t.surface.is_layer() || !config.class_disabled(&t.class));
+    let outputs = snap.outputs();
+    let focused_output = snap.focused_output();
     stage(&mut timings, "select", t, ());
 
-    // collect: the provider's own `collect.*` stages, or one `collect` stage.
+    // collect: the providers' own stages, or one `collect` stage.
     let t = Instant::now();
-    let mut per_target: Vec<Vec<Element>> = Vec::with_capacity(targets.len());
-    let mut reports = Vec::new();
-    let mut sub = Timings::default();
-    for target in &targets {
-        let budget = Budget {
-            deadline: Instant::now() + PROVIDER_BUDGET,
-        };
-        match provider
-            .collect(target, budget)
-            .instrument(tracing::debug_span!("collect", provider = provider.name()))
-            .await
-        {
-            Ok(c) => {
-                if c.report.truncated {
-                    tracing::warn!(provider = provider.name(), "budget exceeded; truncated");
+    let top_idx: Vec<usize> = (0..targets.len())
+        .filter(|&i| !targets[i].surface.is_layer())
+        .collect();
+    let layer_refs: Vec<&Target> = targets.iter().filter(|t| t.surface.is_layer()).collect();
+    let tops = async {
+        let mut out = Vec::with_capacity(top_idx.len());
+        let mut sub = Timings::default();
+        for &i in &top_idx {
+            let target = &targets[i];
+            let budget = Budget {
+                deadline: Instant::now() + PROVIDER_BUDGET,
+            };
+            match provider
+                .collect(target, budget)
+                .instrument(tracing::debug_span!("collect", provider = provider.name()))
+                .await
+            {
+                Ok(c) => {
+                    if c.report.truncated {
+                        tracing::warn!(provider = provider.name(), "budget exceeded; truncated");
+                    }
+                    sub.0.extend(c.timings.0);
+                    out.push((c.elements, c.report));
                 }
-                per_target.push(c.elements);
-                reports.push(c.report);
-                sub.0.extend(c.timings.0);
-            }
-            Err(e) => {
-                tracing::warn!(provider = provider.name(), "{e}");
-                per_target.push(Vec::new());
-                reports.push(CollectReport {
-                    provider: provider.name().into(),
-                    reasons: vec![e.to_string()],
-                    ..Default::default()
-                });
+                Err(e) => {
+                    tracing::warn!(provider = provider.name(), "{e}");
+                    out.push((
+                        Vec::new(),
+                        CollectReport {
+                            provider: provider.name().into(),
+                            reasons: vec![e.to_string()],
+                            ..Default::default()
+                        },
+                    ));
+                }
             }
         }
+        (out, sub)
+    };
+    let lays = async {
+        if layer_refs.is_empty() {
+            LayerCollect::default()
+        } else {
+            let budget = Budget {
+                deadline: Instant::now() + PROVIDER_BUDGET,
+            };
+            layers.collect_layers(&layer_refs, budget).await
+        }
+    };
+    let ((top_out, sub), lc) = tokio::join!(tops, lays);
+    let mut per_target: Vec<Vec<Element>> = vec![Vec::new(); targets.len()];
+    let mut reports = Vec::new();
+    for (&i, (els, rep)) in top_idx.iter().zip(top_out) {
+        per_target[i] = els;
+        reports.push(rep);
     }
-    if sub.0.is_empty() {
+    let layer_idx: Vec<usize> = (0..targets.len())
+        .filter(|&i| targets[i].surface.is_layer())
+        .collect();
+    for (&i, c) in layer_idx.iter().zip(lc.per_target) {
+        per_target[i] = c.elements;
+        reports.push(c.report);
+    }
+    if sub.0.is_empty() && lc.timings.0.is_empty() {
         stage(&mut timings, "collect", t, ());
     } else {
         timings.0.extend(sub.0);
+        timings.0.extend(lc.timings.0);
     }
 
     // vision: policy per target, then capture → detect → merge (design D18).
     let mut report = VisionReport::default();
     let mut vision_timings = Timings::default();
     let mut merge_ms = Duration::ZERO;
-    let mut elements = Vec::new();
+    let mut finals: Vec<Vec<Element>> = Vec::with_capacity(targets.len());
     for (target, atspi) in targets.iter().zip(per_target) {
         let usable = match action {
             Some(a) => atspi.iter().filter(|e| hintable(e, a)).count(),
@@ -506,11 +624,11 @@ pub async fn run<P: ElementProvider + Sync, V: VisionStage>(
             };
         }
         if !run {
-            elements.extend(atspi);
+            finals.push(atspi);
             continue;
         }
         let found = match vision
-            .collect(target, &hypr.outputs)
+            .collect(target, &outputs)
             .instrument(tracing::debug_span!("vision"))
             .await
         {
@@ -530,7 +648,7 @@ pub async fn run<P: ElementProvider + Sync, V: VisionStage>(
             }
         };
         let t = Instant::now();
-        elements.extend(merge(atspi, found, &vision.merge_params()));
+        finals.push(merge(atspi, found, &vision.merge_params()));
         merge_ms += t.elapsed();
     }
     if report.ran {
@@ -547,8 +665,31 @@ pub async fn run<P: ElementProvider + Sync, V: VisionStage>(
         }
         timings.record("merge", merge_ms);
     }
-    if let Some(a) = action {
-        elements.retain(|e| hintable(e, a));
+    if scope == Scope::All {
+        let floating: Vec<bool> = targets
+            .iter()
+            .map(|t| match &t.surface {
+                woints_core::model::Surface::Toplevel { address } => snap
+                    .clients
+                    .iter()
+                    .chain(snap.active.iter())
+                    .find(|c| c.address == *address)
+                    .is_some_and(|c| c.floating),
+                _ => false,
+            })
+            .collect();
+        let culled = cull_under_floating(&mut finals, &targets, &floating);
+        tracing::debug!(culled, "elements under floating windows dropped");
+    }
+    let mut elements = Vec::new();
+    let mut layer = Vec::new();
+    for (target, els) in targets.iter().zip(finals) {
+        for e in els {
+            if action.is_none_or(|a| hintable(&e, a)) {
+                layer.push(target.surface.is_layer());
+                elements.push(e);
+            }
+        }
     }
     for (n, e) in elements.iter_mut().enumerate() {
         e.id = ElementId(n as u32 + 1);
@@ -556,9 +697,10 @@ pub async fn run<P: ElementProvider + Sync, V: VisionStage>(
 
     let (scene, labels) = build_scene(
         &elements,
+        &layer,
         &targets,
-        &hypr.outputs,
-        hypr.focused_output.as_ref(),
+        &outputs,
+        focused_output.as_ref(),
         scope,
         theme,
         &mut timings,
@@ -571,30 +713,45 @@ pub async fn run<P: ElementProvider + Sync, V: VisionStage>(
         timings,
         reports,
         vision: report,
+        layer,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use woints_core::geom::{Point, Size};
     use woints_core::ports::Badge;
+    use woints_hypr::{Client, Layer, LayerEntry, Monitor};
 
-    fn outputs() -> Vec<OutputGeom> {
+    fn monitors() -> Vec<Monitor> {
         vec![
-            OutputGeom {
-                id: OutputId("A".into()),
-                origin: Point::new(-1920, 0),
-                logical_size: Size { w: 1920, h: 1080 },
+            Monitor {
+                id: 0,
+                name: "A".into(),
+                x: -1920,
+                width: 1920,
+                height: 1080,
                 scale: 1.0,
+                ..Default::default()
             },
-            OutputGeom {
-                id: OutputId("B".into()),
-                origin: Point::new(0, 0),
-                logical_size: Size { w: 1440, h: 900 },
+            Monitor {
+                id: 1,
+                name: "B".into(),
+                width: 2880,
+                height: 1800,
                 scale: 2.0,
+                focused: true,
+                ..Default::default()
             },
         ]
+    }
+
+    fn snap(active: Option<Client>) -> HyprSnapshot {
+        HyprSnapshot {
+            monitors: monitors(),
+            active,
+            ..Default::default()
+        }
     }
 
     fn window(x: i32, y: i32) -> Client {
@@ -609,18 +766,16 @@ mod tests {
     }
 
     async fn run_on(win: Client) -> Output {
-        let h = HyprState {
-            outputs: outputs(),
-            focused_output: Some(OutputId("B".into())),
-            active: Some(win),
-        };
+        let h = snap(Some(win));
         run(
             h,
             Scope::Focused,
             None,
+            &Config::default(),
             &Theme::default(),
             Timings::default(),
             &DemoProvider,
+            &NoLayers,
             &NoVision,
         )
         .await
@@ -710,18 +865,16 @@ mod tests {
     }
 
     async fn run_vision(min: usize) -> Output {
-        let h = HyprState {
-            outputs: outputs(),
-            focused_output: Some(OutputId("B".into())),
-            active: Some(window(-1500, 100)),
-        };
+        let h = snap(Some(window(-1500, 100)));
         run(
             h,
             Scope::Focused,
             Some(Action::Click),
+            &Config::default(),
             &Theme::default(),
             Timings::default(),
             &DemoProvider,
+            &NoLayers,
             &FakeVision { min },
         )
         .await
@@ -785,18 +938,16 @@ mod tests {
 
     #[tokio::test]
     async fn no_focused_window() {
-        let h = HyprState {
-            outputs: outputs(),
-            focused_output: None,
-            active: None,
-        };
+        let h = snap(None);
         let o = run(
             h,
             Scope::Focused,
             None,
+            &Config::default(),
             &Theme::default(),
             Timings::default(),
             &DemoProvider,
+            &NoLayers,
             &NoVision,
         )
         .await
@@ -804,27 +955,199 @@ mod tests {
         assert!(o.targets.is_empty() && o.elements.is_empty() && o.scene.badges.is_empty());
     }
 
+    fn bar() -> LayerEntry {
+        LayerEntry {
+            monitor: "B".into(),
+            level: 1,
+            layer: Layer {
+                address: "0xb".into(),
+                x: 0,
+                y: 0,
+                w: 1440,
+                h: 40,
+                namespace: "quickshell:bar".into(),
+                pid: 77,
+            },
+        }
+    }
+
+    /// Ten 200×30 bar items, all larger than the window's demo boxes.
+    struct FakeLayers;
+
+    impl LayerSource for FakeLayers {
+        async fn collect_layers(&self, targets: &[&Target], _: Budget) -> LayerCollect {
+            let mut timings = Timings::default();
+            timings.record("qs.list", Duration::from_millis(1));
+            LayerCollect {
+                per_target: targets
+                    .iter()
+                    .map(|t| Collected {
+                        elements: (0..10)
+                            .map(|n| Element {
+                                id: ElementId(0),
+                                rect: Rect::new(t.rect.x + n * 140, t.rect.y, 130, 30),
+                                role: "quickshell".into(),
+                                name: format!("item {n}"),
+                                source: ElementSource::Quickshell,
+                                actions: vec![Action::Click],
+                                caps: vec![],
+                                confidence: 1.0,
+                                handle: None,
+                            })
+                            .collect(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                timings,
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn other_scopes_unsupported() {
-        let h = HyprState {
-            outputs: outputs(),
-            focused_output: None,
-            active: None,
-        };
+    async fn window_plus_bar_one_label_space() {
+        let mut s = snap(Some(window(100, 100)));
+        s.layers = vec![bar()];
+        let theme = Theme::default();
+        let o = run(
+            s,
+            Scope::FocusedAndLayers,
+            None,
+            &Config::default(),
+            &theme,
+            Timings::default(),
+            &DemoProvider,
+            &FakeLayers,
+            &NoVision,
+        )
+        .await
+        .unwrap();
+        assert_eq!(o.targets.len(), 2);
+        assert!(o.targets[1].surface.is_layer());
+        assert_eq!(o.elements.len(), 15);
+        assert!(o.timings.get("qs.list").is_some());
+        // Window elements get the single glyphs; every pair goes to the bar,
+        // although each bar item is larger than every window box.
+        for (i, l) in o.labels.iter().enumerate() {
+            if !o.layer[i] {
+                assert_eq!(l.chars().count(), 1, "window {l}");
+            } else if l.chars().count() == 1 {
+                assert!(
+                    o.labels
+                        .iter()
+                        .zip(&o.layer)
+                        .filter(|(_, b)| !**b)
+                        .all(|(w, _)| w.chars().count() == 1)
+                );
+            }
+        }
         assert_eq!(
+            o.labels
+                .iter()
+                .zip(&o.layer)
+                .filter(|(l, b)| l.chars().count() == 2 && !**b)
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn layers_scope_has_no_toplevel() {
+        let mut s = snap(Some(window(100, 100)));
+        s.layers = vec![bar()];
+        let o = run(
+            s,
+            Scope::Layers,
+            None,
+            &Config::default(),
+            &Theme::default(),
+            Timings::default(),
+            &DemoProvider,
+            &FakeLayers,
+            &NoVision,
+        )
+        .await
+        .unwrap();
+        assert!(o.targets.iter().all(|t| t.surface.is_layer()));
+        assert_eq!(o.elements.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn disabled_class_dropped() {
+        let mut c = Config::default();
+        c.apps.disabled_classes = vec!["fo?t".into()];
+        let o = run(
+            snap(Some(window(100, 100))),
+            Scope::Focused,
+            None,
+            &c,
+            &Theme::default(),
+            Timings::default(),
+            &DemoProvider,
+            &NoLayers,
+            &NoVision,
+        )
+        .await
+        .unwrap();
+        assert!(o.targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn quickshell_off_spawns_nothing() {
+        let before = woints_qs::spawn_count();
+        let mut s = snap(Some(window(100, 100)));
+        s.layers = vec![bar()];
+        for scope in [Scope::Focused, Scope::FocusedAndLayers, Scope::Layers] {
             run(
-                h,
-                Scope::All,
-                None,
+                s.clone(),
+                scope,
+                Some(Action::Click),
+                &Config::default(),
                 &Theme::default(),
                 Timings::default(),
                 &DemoProvider,
-                &NoVision
+                &NoLayers,
+                &NoVision,
             )
             .await
-            .unwrap_err(),
-            SelectError::Unsupported(Scope::All)
-        );
+            .unwrap();
+        }
+        assert_eq!(woints_qs::spawn_count(), before);
+    }
+
+    #[test]
+    fn floating_over_tiled() {
+        let t = |addr: &str, r: Rect<woints_core::geom::Global>| Target {
+            surface: woints_core::model::Surface::Toplevel {
+                address: addr.into(),
+            },
+            rect: r,
+            output: OutputId("B".into()),
+            pid: None,
+            class: addr.into(),
+        };
+        let el = |x, y, w, h| Element {
+            id: ElementId(0),
+            rect: Rect::new(x, y, w, h),
+            role: "push button".into(),
+            name: String::new(),
+            source: ElementSource::Demo,
+            actions: vec![Action::Click],
+            caps: vec![],
+            confidence: 1.0,
+            handle: None,
+        };
+        let targets = [
+            t("tiled", Rect::new(0, 0, 1000, 800)),
+            t("float", Rect::new(50, 50, 300, 300)),
+        ];
+        let mut per = vec![
+            vec![el(100, 100, 40, 20), el(600, 600, 40, 20)],
+            vec![el(60, 60, 10, 10)],
+        ];
+        assert_eq!(cull_under_floating(&mut per, &targets, &[false, true]), 1);
+        assert_eq!(per[0].len(), 1);
+        assert_eq!(per[0][0].rect.x, 600);
+        assert_eq!(per[1].len(), 1);
     }
 
     #[tokio::test]
@@ -835,6 +1158,7 @@ mod tests {
         let (scene, labels) = second_scene(
             &o.scene,
             &o.elements,
+            &o.layer,
             source,
             "a",
             &o.targets,

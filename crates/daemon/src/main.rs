@@ -1,6 +1,8 @@
 //! `wointsd`: resident daemon owning the socket, Hyprland IPC and the overlay.
 
 mod daemon;
+mod doctor;
+mod keys;
 mod pipeline;
 mod server;
 mod session;
@@ -29,10 +31,25 @@ async fn main() -> std::process::ExitCode {
         .with_target(false)
         .init();
 
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("wointsd {}", env!("CARGO_PKG_VERSION"));
         return std::process::ExitCode::SUCCESS;
     }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("usage: wointsd [--config PATH]");
+        return std::process::ExitCode::SUCCESS;
+    }
+    let config_path = match args.iter().position(|a| a == "--config") {
+        Some(i) => match args.get(i + 1) {
+            Some(p) => Some(std::path::PathBuf::from(p)),
+            None => {
+                eprintln!("wointsd: --config needs a path");
+                return std::process::ExitCode::from(2);
+            }
+        },
+        None => woints_core::config::default_path(),
+    };
 
     let path = socket_path();
     let listener = match server::bind(&path).await {
@@ -55,7 +72,8 @@ async fn main() -> std::process::ExitCode {
             None
         }
     };
-    let (daemon, overlay_rx) = Daemon::new(hypr.clone());
+    let (daemon, overlay_rx) = Daemon::new(hypr.clone(), config_path);
+    daemon.refresh_layout().await;
     if let Err(e) = daemon.start_overlay().await {
         tracing::error!("overlay unavailable at startup: {e}");
     }
@@ -69,6 +87,14 @@ async fn main() -> std::process::ExitCode {
 
     let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
     let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler");
+    let mut hup = signal(SignalKind::hangup()).expect("SIGHUP handler");
+    let d = daemon.clone();
+    tokio::spawn(async move {
+        while hup.recv().await.is_some() {
+            tracing::info!("SIGHUP: reloading config");
+            let _ = d.reload().await;
+        }
+    });
     tokio::select! {
         _ = daemon.shutdown.notified() => tracing::info!("quit requested"),
         _ = term.recv() => tracing::info!("SIGTERM"),
@@ -110,6 +136,7 @@ async fn hypr_events(daemon: Arc<Daemon>, hypr: Hypr) {
                         daemon.apply(Input::MonitorsChanged).await;
                     }
                     Ok(Some(Event::FocusedMon { .. })) => daemon.invalidate_monitors().await,
+                    Ok(Some(Event::ActiveLayout { .. })) => daemon.refresh_layout().await,
                     Ok(Some(_)) => {}
                     Ok(None) => break,
                     Err(e) => {
@@ -125,10 +152,11 @@ async fn hypr_events(daemon: Arc<Daemon>, hypr: Hypr) {
 }
 
 async fn watchdog(daemon: Arc<Daemon>) {
-    let max_showing = Duration::from_millis(u64::from(daemon.theme.timing.max_showing_ms));
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     loop {
         tick.tick().await;
+        let max_showing =
+            Duration::from_millis(u64::from(daemon.settings().theme.timing.max_showing_ms));
         daemon.apply(Input::Tick { max_showing }).await;
     }
 }

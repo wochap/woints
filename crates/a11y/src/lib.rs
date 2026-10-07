@@ -14,5 +14,5 @@ pub mod rule;
 pub mod walk;
 
 pub use actuator::AtspiActuator;
-pub use conn::A11yConnection;
-pub use provider::AtspiProvider;
+pub use conn::{A11yConnection, BusInfo, bus_info};
+pub use provider::{AtspiProvider, Diagnosis};

@@ -43,6 +43,18 @@ impl AppCache {
 
 pub type SharedApps = Arc<Mutex<AppCache>>;
 
+/// See [`AtspiProvider::diagnose`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Diagnosis {
+    pub paired: Option<String>,
+    pub toolkit: Option<String>,
+    pub root_children: Option<usize>,
+    pub collection: Option<bool>,
+    pub collection_count: Option<usize>,
+    pub walk_count: Option<usize>,
+    pub usable: usize,
+}
+
 pub struct AtspiProvider {
     conn: Arc<A11yConnection>,
     apps: SharedApps,
@@ -317,6 +329,54 @@ impl AtspiProvider {
         };
         lock(cache).insert(o.clone(), a.clone());
         Some(a)
+    }
+
+    /// What `doctor` reports about one target: pairing, root children,
+    /// Collection support, per-strategy counts and usable elements.
+    pub async fn diagnose(
+        &self,
+        target: &Target,
+        budget: Budget,
+    ) -> Result<Diagnosis, ProviderError> {
+        let (c, generation) = self.conn.get().await?;
+        let mut d = Diagnosis::default();
+        let apps = self.apps(&c, generation).await?;
+        if let Some((i, _)) = pick_app(&apps, target.pid, &target.class) {
+            d.root_children = dbus::children(&c, &Obj::root(&apps[i].bus_name))
+                .await
+                .ok()
+                .map(|v| v.len());
+        }
+        let mut report = CollectReport::default();
+        let paired = self.pair(&c, generation, target, &mut report).await?;
+        d.paired = report.paired.filter(|p| p != "no-a11y-app");
+        d.toolkit = report.toolkit;
+        if let Some((app, frame)) = paired {
+            let profile = ToolkitProfile::lookup(&app.toolkit, &app.version, &target.class);
+            d.collection = dbus::interfaces(&c, &frame)
+                .await
+                .ok()
+                .map(|i| i.iter().any(|i| i == dbus::COLLECTION));
+            if d.collection == Some(true) {
+                let mut r = CollectReport::default();
+                d.collection_count = Some(
+                    self.collection(&c, &frame, &profile, &mut r)
+                        .await
+                        .map_or(0, |v| v.len()),
+                );
+            }
+            let mut r = CollectReport::default();
+            d.walk_count = Some(
+                self.tree_walk(&c, &frame, &profile, budget, &mut r)
+                    .await
+                    .len(),
+            );
+        }
+        d.usable = self
+            .collect_target(target, budget)
+            .await
+            .map_or(0, |c| c.elements.len());
+        Ok(d)
     }
 
     /// Run every phase for one target.

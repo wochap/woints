@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::act::Axis;
+use crate::doctor::Report;
 use crate::geom::{Global, OutputId, Rect};
 use crate::model::{Action, Element, ElementId, Scope, Target, Timings};
 use crate::ports::CollectReport;
@@ -28,8 +29,9 @@ fn default_iterations() -> u32 {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Hints {
-        #[serde(default)]
-        scope: Scope,
+        /// `scope.default` from the config when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Scope>,
         /// Action performed when a label is matched (default `click`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<Action>,
@@ -38,15 +40,19 @@ pub enum Request {
     Status,
     Quit,
     Snapshot {
-        #[serde(default)]
-        scope: Scope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Scope>,
     },
     Bench {
         #[serde(default = "default_iterations")]
         iterations: u32,
-        #[serde(default)]
-        scope: Scope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Scope>,
     },
+    /// Re-read the config file.
+    Reload,
+    /// Diagnostic report.
+    Doctor,
     /// Act on an element of a stored snapshot without showing the overlay.
     Act {
         snapshot_id: u64,
@@ -65,7 +71,7 @@ pub enum Request {
 }
 
 const COMMANDS: &[&str] = &[
-    "hints", "cancel", "status", "quit", "snapshot", "bench", "act",
+    "hints", "cancel", "status", "quit", "snapshot", "bench", "act", "reload", "doctor",
 ];
 
 /// Parse one request line, producing the protocol's error message on failure.
@@ -190,6 +196,35 @@ pub struct StatusReply {
     /// `data-control` or `unavailable`.
     #[serde(default)]
     pub clipboard: String,
+    #[serde(default)]
+    pub config: ConfigStatus,
+}
+
+/// Which config is in effect and what went wrong with the last load.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ConfigStatus {
+    /// File path, `null` when running on built-in defaults.
+    pub path: Option<String>,
+    /// `defaults` or the file path.
+    pub source: String,
+    /// Unix time (ms) of the last successful load.
+    pub loaded_at: u64,
+    /// Errors of the last failed load; the previous config stays active.
+    #[serde(default)]
+    pub errors: Vec<String>,
+    /// Unknown keys and similar non-fatal findings.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReloadReply {
+    pub config: ConfigStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DoctorReply {
+    pub report: Report,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,14 +288,14 @@ mod tests {
     fn every_command() {
         rt(
             Request::Hints {
-                scope: Scope::Focused,
+                scope: Some(Scope::Focused),
                 action: None,
             },
             json!({"cmd":"hints","scope":"focused"}),
         );
         rt(
             Request::Hints {
-                scope: Scope::All,
+                scope: Some(Scope::All),
                 action: Some(Action::Drag),
             },
             json!({"cmd":"hints","scope":"all","action":"drag"}),
@@ -303,17 +338,19 @@ mod tests {
         rt(Request::Quit, json!({"cmd":"quit"}));
         rt(
             Request::Snapshot {
-                scope: Scope::Focused,
+                scope: Some(Scope::Focused),
             },
             json!({"cmd":"snapshot","scope":"focused"}),
         );
         rt(
             Request::Bench {
                 iterations: 20,
-                scope: Scope::Focused,
+                scope: Some(Scope::Focused),
             },
             json!({"cmd":"bench","iterations":20,"scope":"focused"}),
         );
+        rt(Request::Reload, json!({"cmd":"reload"}));
+        rt(Request::Doctor, json!({"cmd":"doctor"}));
     }
 
     #[test]
@@ -321,7 +358,7 @@ mod tests {
         assert_eq!(
             parse_request(r#"{"cmd":"hints"}"#).unwrap(),
             Request::Hints {
-                scope: Scope::Focused,
+                scope: None,
                 action: None
             }
         );
@@ -329,7 +366,7 @@ mod tests {
             parse_request(r#"{"cmd":"bench"}"#).unwrap(),
             Request::Bench {
                 iterations: 10,
-                scope: Scope::Focused
+                scope: None
             }
         );
     }
@@ -409,6 +446,22 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["vision"], json!({"ran": true, "reason": "too_few_atspi"}));
         assert_eq!(serde_json::from_value::<SnapshotReply>(v).unwrap(), r);
+    }
+
+    #[test]
+    fn config_status_shape() {
+        let v = serde_json::to_value(ConfigStatus {
+            path: None,
+            source: "defaults".into(),
+            loaded_at: 5,
+            errors: vec![],
+            warnings: vec![],
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            json!({"path":null,"source":"defaults","loaded_at":5,"errors":[],"warnings":[]})
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ woints-hypr.workspace = true
 woints-overlay.workspace = true
 woints-a11y.workspace = true
 woints-input.workspace = true
+woints-qs.workspace = true
 woints-vision = { workspace = true, optional = true }
 anyhow.workspace = true
 serde.workspace = true
@@ -22,6 +23,7 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+xkbcommon.workspace = true
 
 [features]
 default = ["vision"]

@@ -18,29 +18,7 @@ impl Decision {
     }
 }
 
-/// Glob match with `*` (any run) and `?` (one char).
-pub fn glob(pattern: &str, s: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let s: Vec<char> = s.chars().collect();
-    let (mut pi, mut si) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
-    while si < s.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
-            pi += 1;
-            si += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some((pi, si));
-            pi += 1;
-        } else if let Some((sp, ss)) = star {
-            pi = sp + 1;
-            si = ss + 1;
-            star = Some((sp, ss + 1));
-        } else {
-            return false;
-        }
-    }
-    p[pi..].iter().all(|c| *c == '*')
-}
+pub use woints_core::config::glob;
 
 /// Decide whether vision runs for one target. `atspi_count` is the number of
 /// usable AT-SPI elements; `other_served` whether any provider returned

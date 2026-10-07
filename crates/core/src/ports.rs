@@ -12,8 +12,6 @@ use crate::vision::Frame;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SelectError {
-    #[error("scope {0} is not supported yet")]
-    Unsupported(Scope),
     #[error("compositor query failed: {0}")]
     Backend(String),
 }

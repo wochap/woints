@@ -115,6 +115,49 @@ impl A11yConnection {
     }
 }
 
+/// `org.a11y.Bus` facts for `doctor`, read on a fresh session connection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BusInfo {
+    pub address: Result<String, String>,
+    /// `org.a11y.Status.IsEnabled`.
+    pub is_enabled: Option<bool>,
+}
+
+pub async fn bus_info() -> BusInfo {
+    let session = match Connection::session().await {
+        Ok(s) => s,
+        Err(e) => {
+            return BusInfo {
+                address: Err(format!("session bus: {e}")),
+                is_enabled: None,
+            };
+        }
+    };
+    let address = match atspi_proxies::bus::BusProxy::builder(&session)
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await
+    {
+        Ok(b) => b
+            .get_address()
+            .await
+            .map_err(|e| format!("org.a11y.Bus.GetAddress: {e}")),
+        Err(e) => Err(format!("org.a11y.Bus: {e}")),
+    };
+    let is_enabled = match atspi_proxies::bus::StatusProxy::builder(&session)
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await
+    {
+        Ok(s) => s.is_enabled().await.ok(),
+        Err(_) => None,
+    };
+    BusInfo {
+        address,
+        is_enabled,
+    }
+}
+
 async fn open() -> Result<Connection, String> {
     let session = Connection::session()
         .await

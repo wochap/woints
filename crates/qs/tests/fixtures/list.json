@@ -1,0 +1,16 @@
+[
+    {
+        "config_path": "/home/gean/.config/quickshell/shell/lock.qml",
+        "id": "fa12di6imt",
+        "launch_time": "2026-10-06T15:35:01",
+        "pid": 94983,
+        "shell_id": "bb5f9770376b8c46089b0a3f18961241"
+    },
+    {
+        "config_path": "/home/gean/.config/quickshell/shell/shell.qml",
+        "id": "hkbczskimt",
+        "launch_time": "2026-10-06T20:43:47",
+        "pid": 574865,
+        "shell_id": "bd3c5ad096b23a4c73d5e27dda10dcbf"
+    }
+]

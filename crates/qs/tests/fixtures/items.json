@@ -1,0 +1,6 @@
+{"protocol":1,"items":[
+{"id":"quickshell:bar/1","ns":"quickshell:bar","screen":"eDP-1","x":12,"y":24,"w":32,"h":32,"label":"Workspace 1","actions":["click","right"]},
+{"id":"quickshell:bar/2","ns":"quickshell:bar","screen":"eDP-1","x":1380.5,"y":24,"w":28,"h":28,"label":"Volume","actions":["click","scroll","frobnicate"]},
+{"id":"quickshell:which-keys/3","ns":"quickshell:which-keys","screen":"eDP-1","x":10,"y":10,"w":40,"h":20,"label":"Close","actions":["click"]},
+{"id":"quickshell:bar/4","ns":"quickshell:bar","screen":"HDMI-A-1","x":12,"y":24,"w":32,"h":32,"label":"Workspace 1","actions":["click"]}
+]}

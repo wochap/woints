@@ -33,6 +33,10 @@
             platforms = pkgs.lib.platforms.linux;
           };
         };
+        quickshell-module = pkgs.runCommand "woints-quickshell-module" { } ''
+          mkdir -p $out/share/quickshell/Woints
+          cp ${./integrations/quickshell}/{qmldir,SHints.qml,Hintable.qml,README.md} $out/share/quickshell/Woints/
+        '';
       });
 
       devShells = forAll (pkgs: {

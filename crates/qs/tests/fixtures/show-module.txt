@@ -1,0 +1,31 @@
+target control-center
+  function open(): void
+  function toggle(): void
+  function close(): void
+target calendar
+  function open(): void
+  function toggle(): void
+  function close(): void
+target window-switcher
+  function toggle(): void
+  function confirm(sessionId: string): void
+  function reverse(mode: string, order: string, sessionId: string): void
+  function hide(): void
+  function advance(mode: string, order: string, sessionId: string): void
+  function show(mode: string, order: string, sessionId: string): void
+target auth
+  function test(variant: string): void
+  function fprint(state: string, note: string): void
+  function cancel(): void
+target notifications
+  function dismissPopups(): void
+  function discardPopups(): void
+  function togglePanel(): void
+  function discard(id: int): void
+target theme
+  function setMode(mode: string): void
+target bar
+  function toggle(): void
+target woints
+  function list(): string
+  function invoke(id: string, action: string): string

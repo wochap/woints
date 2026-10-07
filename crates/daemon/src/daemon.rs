@@ -1,31 +1,33 @@
 //! Shared daemon state and request handlers.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use woints_a11y::{A11yConnection, AtspiActuator, AtspiProvider};
 use woints_core::act::{ActuatorKind, ActuatorRouting, Axis, InputConfig, PointerKind};
-use woints_core::config::{Config, VisionMode};
+use woints_core::config::{self as cfg, Config, ProviderMode, VisionMode};
 use woints_core::geom::{OutputId, pick_output};
-use woints_core::model::{Action, Element, ElementId, Scope, Target, Timings};
+use woints_core::model::{Action, Element, ElementId, ElementSource, Scope, Target, Timings};
 use woints_core::ports::{
     ActError, Actuator, Budget, CollectReport, Collected, ElementProvider, KeyPress, Overlay,
     OverlayError, OverlayEvent, ProviderError, Scene, ScrollFrame,
 };
 use woints_core::proto::{
-    ActReply, ActionOutcome, BenchReply, BenchRow, HintsReply, OutputInfo, ProviderStatus, Request,
-    Response, SnapshotReply, State, StateReply, StatusReply,
+    ActReply, ActionOutcome, BenchReply, BenchRow, ConfigStatus, HintsReply, OutputInfo,
+    ProviderStatus, ReloadReply, Request, Response, SnapshotReply, State, StateReply, StatusReply,
 };
 use woints_core::theme::{Eliminated, Theme};
-use woints_hypr::{Hypr, Monitor};
+use woints_hypr::{Hypr, HyprSnapshot, Monitor};
 use woints_input::{AbsoluteBackend, Backend, MovecursorBackend, PointerActuator};
 use woints_overlay::render::{OutputSurface, Renderer};
 use woints_overlay::{OverlayHandle, PointerLink};
+use woints_qs::QuickshellIpcProvider;
 
-use crate::pipeline::{self, DemoProvider, HyprState};
+use crate::pipeline::{self, DemoProvider, NoLayers};
 use crate::session::{Effect, Input, Session};
 use crate::store::SnapshotStore;
 
@@ -80,6 +82,88 @@ struct Shown {
     scene: Scene,
     labels: Vec<String>,
     targets: Vec<Target>,
+    /// Per element of the snapshot: it belongs to a layer target.
+    layer: Vec<bool>,
+}
+
+/// The active config and everything derived from it; swapped whole on reload.
+pub struct Settings {
+    pub config: Config,
+    pub theme: Theme,
+    pub input: InputConfig,
+    pub routing: ActuatorRouting,
+}
+
+impl Settings {
+    pub fn new(config: Config, layout: Option<&[Option<char>]>) -> Self {
+        let alphabet = config.alphabet(layout);
+        let theme = config.theme(&alphabet);
+        let input = config.input_config();
+        Self {
+            routing: ActuatorRouting {
+                prefer: input.prefer,
+            },
+            theme,
+            input,
+            config,
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Load the config at `path`, falling back to defaults on errors (reported
+/// in the status).
+pub fn initial_config(path: Option<&std::path::Path>) -> (Config, ConfigStatus) {
+    let Some(path) = path else {
+        return (
+            Config::default(),
+            ConfigStatus {
+                source: "defaults".into(),
+                loaded_at: now_ms(),
+                ..Default::default()
+            },
+        );
+    };
+    match cfg::load(path) {
+        Ok((l, src)) => (l.config, loaded_status(&src, l.warnings)),
+        Err(errors) => {
+            for e in &errors {
+                tracing::error!("config: {e}; using defaults");
+            }
+            (
+                Config::default(),
+                ConfigStatus {
+                    path: Some(path.display().to_string()),
+                    source: "defaults".into(),
+                    loaded_at: now_ms(),
+                    errors,
+                    warnings: Vec::new(),
+                },
+            )
+        }
+    }
+}
+
+fn loaded_status(src: &cfg::Source, warnings: Vec<String>) -> ConfigStatus {
+    for w in &warnings {
+        tracing::warn!("config: {w}");
+    }
+    let (path, source) = match src {
+        cfg::Source::Defaults => (None, "defaults".to_owned()),
+        cfg::Source::File(p) => (Some(p.display().to_string()), p.display().to_string()),
+    };
+    ConfigStatus {
+        path,
+        source,
+        loaded_at: now_ms(),
+        errors: Vec::new(),
+        warnings,
+    }
 }
 
 /// How long `hints` waits for the overlay to commit.
@@ -87,12 +171,12 @@ const SHOW_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct Daemon {
     pub started: Instant,
-    pub theme: Theme,
-    #[cfg_attr(not(feature = "vision"), allow(dead_code))]
-    pub config: Config,
-    pub input: InputConfig,
-    routing: ActuatorRouting,
-    hypr: Option<Hypr>,
+    settings: RwLock<Arc<Settings>>,
+    config_path: Option<PathBuf>,
+    config_status: Mutex<ConfigStatus>,
+    /// Home-row glyphs of the active layout, for `keys.mode = "auto"`.
+    layout: Mutex<Option<Vec<Option<char>>>>,
+    pub(crate) hypr: Option<Hypr>,
     hypr_version: Mutex<Option<String>>,
     monitors: Mutex<Option<Vec<Monitor>>>,
     overlay: Mutex<OverlaySlot>,
@@ -103,7 +187,8 @@ pub struct Daemon {
     last_collect: Mutex<Vec<CollectReport>>,
     last_action: Mutex<Option<ActionOutcome>>,
     renderer: Mutex<Renderer>,
-    provider: Provider,
+    pub(crate) provider: Provider,
+    pub(crate) quickshell: Option<QuickshellIpcProvider>,
     /// Vision over the running overlay's capture link; rebuilt with the overlay.
     #[cfg(feature = "vision")]
     vision: Mutex<Option<Arc<pipeline::Vision>>>,
@@ -125,7 +210,10 @@ enum OverlaySlot {
 }
 
 impl Daemon {
-    pub fn new(hypr: Option<Hypr>) -> (Arc<Self>, mpsc::UnboundedReceiver<OverlayEvent>) {
+    pub fn new(
+        hypr: Option<Hypr>,
+        config_path: Option<PathBuf>,
+    ) -> (Arc<Self>, mpsc::UnboundedReceiver<OverlayEvent>) {
         let (provider, actuator) = if std::env::var("WOINTS_DEMO").as_deref() == Ok("1") {
             tracing::info!("WOINTS_DEMO=1: using the demo provider");
             (Provider::Demo(DemoProvider), None)
@@ -135,24 +223,37 @@ impl Daemon {
             let a = AtspiActuator::new(conn, p.apps_cache());
             (Provider::Atspi(p), Some(a))
         };
-        Self::with_provider(hypr, provider, actuator)
+        let (config, status) = initial_config(config_path.as_deref());
+        let qs = QuickshellIpcProvider::new(Duration::from_millis(
+            config.providers.quickshell.budget_ms,
+        ));
+        Self::with_parts(
+            hypr,
+            provider,
+            actuator,
+            Some(qs),
+            config,
+            status,
+            config_path,
+        )
     }
 
-    pub fn with_provider(
+    pub fn with_parts(
         hypr: Option<Hypr>,
         provider: Provider,
         actuator: Option<AtspiActuator>,
+        quickshell: Option<QuickshellIpcProvider>,
+        config: Config,
+        status: ConfigStatus,
+        config_path: Option<PathBuf>,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<OverlayEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let input = InputConfig::default();
         let d = Arc::new(Self {
             started: Instant::now(),
-            theme: Theme::default(),
-            config: config_from_env(),
-            routing: ActuatorRouting {
-                prefer: input.prefer,
-            },
-            input,
+            settings: RwLock::new(Arc::new(Settings::new(config, None))),
+            config_path,
+            config_status: Mutex::new(status),
+            layout: Mutex::new(None),
             hypr,
             hypr_version: Mutex::new(None),
             monitors: Mutex::new(None),
@@ -165,6 +266,7 @@ impl Daemon {
             last_action: Mutex::new(None),
             renderer: Mutex::new(Renderer::new()),
             provider,
+            quickshell,
             #[cfg(feature = "vision")]
             vision: Mutex::new(None),
             actuator,
@@ -174,6 +276,106 @@ impl Daemon {
             shutdown: Notify::new(),
         });
         (d, rx)
+    }
+
+    /// The settings in effect; cheap to clone, stable for one request.
+    pub fn settings(&self) -> Arc<Settings> {
+        self.settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn set_settings(&self, s: Settings) {
+        *self.settings.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(s);
+    }
+
+    /// Swap in `config`; cancels a session whose alphabet changed and
+    /// re-renders one whose look changed.
+    async fn install(&self, config: Config) {
+        let layout = self.layout.lock().await.clone();
+        let old = self.settings();
+        let new = Settings::new(config, layout.as_deref());
+        let alphabet_changed = old.theme.hint.alphabet != new.theme.hint.alphabet;
+        let look_changed = old.theme != new.theme;
+        let theme = new.theme.clone();
+        self.set_settings(new);
+        #[cfg(feature = "vision")]
+        if let OverlaySlot::Running(h) = &*self.overlay.lock().await {
+            *self.vision.lock().await = Some(Arc::new(pipeline::Vision::new(
+                h.capture_link(),
+                &self.settings().config,
+            )));
+        }
+        if self.state().await == State::Idle {
+            return;
+        }
+        if alphabet_changed {
+            tracing::info!("label alphabet changed; cancelling the session");
+            self.apply(Input::Cancel).await;
+        } else if look_changed {
+            let scene = {
+                let mut shown = self.shown.lock().await;
+                let Some(sh) = shown.as_mut() else { return };
+                sh.scene.theme = theme.clone();
+                sh.scene.clone()
+            };
+            if let Some(f) = self.first.lock().await.as_mut() {
+                f.scene.theme = theme;
+            }
+            self.update_overlay(scene).await;
+        }
+    }
+
+    /// `reload` and SIGHUP: parse, validate, swap; keep the last good config
+    /// on error.
+    pub async fn reload(&self) -> Response {
+        let Some(path) = self.config_path.clone() else {
+            return Response::err("no config path: neither XDG_CONFIG_HOME nor HOME is set");
+        };
+        match cfg::load(&path) {
+            Ok((l, src)) => {
+                let status = loaded_status(&src, l.warnings);
+                *self.config_status.lock().await = status.clone();
+                self.install(l.config).await;
+                tracing::info!(source = %status.source, "config reloaded");
+                Response::with(&ReloadReply { config: status })
+            }
+            Err(errors) => {
+                for e in &errors {
+                    tracing::error!("config reload: {e}; keeping the previous config");
+                }
+                let msg = errors.join("; ");
+                self.config_status.lock().await.errors = errors;
+                Response::err(msg)
+            }
+        }
+    }
+
+    pub async fn config_status(&self) -> ConfigStatus {
+        self.config_status.lock().await.clone()
+    }
+
+    /// Re-read the keyboard layout from Hyprland for `keys.mode = "auto"`.
+    pub async fn refresh_layout(&self) {
+        let Some(h) = &self.hypr else { return };
+        let glyphs = match h.keyboards().await {
+            Ok(kbs) => crate::keys::main_keyboard(&kbs).and_then(crate::keys::layout_glyphs),
+            Err(e) => {
+                tracing::warn!("keyboard layout: {e}");
+                None
+            }
+        };
+        if glyphs.is_none() {
+            tracing::info!("keyboard layout unknown; labels use keys.alphabet");
+        }
+        let changed = *self.layout.lock().await != glyphs;
+        if changed {
+            *self.layout.lock().await = glyphs;
+            let config = self.settings().config.clone();
+            self.install(config).await;
+            tracing::info!(alphabet = %self.settings().theme.hint.alphabet, "label alphabet");
+        }
     }
 
     /// Start the overlay thread and forward its events into the daemon channel.
@@ -193,7 +395,7 @@ impl Daemon {
         {
             *self.vision.lock().await = Some(Arc::new(pipeline::Vision::new(
                 handle.capture_link(),
-                &self.config,
+                &self.settings().config,
             )));
         }
         *self.overlay.lock().await = OverlaySlot::Running(handle);
@@ -226,7 +428,7 @@ impl Daemon {
     }
 
     async fn hide_overlay_and_wait(&self) {
-        let timeout = Duration::from_millis(u64::from(self.input.unmap_timeout_ms));
+        let timeout = Duration::from_millis(u64::from(self.settings().input.unmap_timeout_ms));
         if let OverlaySlot::Running(h) = &*self.overlay.lock().await {
             match tokio::time::timeout(timeout, h.hide_and_wait()).await {
                 Ok(Ok(())) => {}
@@ -237,7 +439,7 @@ impl Daemon {
     }
 
     fn flash_ms(&self) -> u32 {
-        self.theme.timing.flash_ms.min(FLASH_CAP_MS)
+        self.settings().theme.timing.flash_ms.min(FLASH_CAP_MS)
     }
 
     /// Feed the session FSM and perform its effects in order.
@@ -260,7 +462,7 @@ impl Daemon {
                             .iter()
                             .filter_map(|&i| sh.labels.get(i).map(String::as_str))
                             .collect();
-                        let fade = self.theme.hint.eliminated == Eliminated::Fade;
+                        let fade = self.settings().theme.hint.eliminated == Eliminated::Fade;
                         pipeline::filter_scene(&sh.scene, &f.typed, &gone, fade, None)
                     };
                     self.update_overlay(scene).await;
@@ -379,18 +581,20 @@ impl Daemon {
         let (scene, labels) = pipeline::second_scene(
             &first.scene,
             &elements,
+            &first.layer,
             source,
             &label,
             &first.targets,
             None,
             scope,
-            &self.theme,
+            &first.scene.theme,
         );
         self.update_overlay(scene.clone()).await;
         *self.shown.lock().await = Some(Shown {
             scene,
             labels: labels.clone(),
             targets: first.targets,
+            layer: first.layer,
         });
         let mut s = self.session.lock().await;
         let (next, _) = s.transition(Input::SecondShown { labels }, Instant::now(), 0);
@@ -438,7 +642,8 @@ impl Daemon {
         if self.state().await == State::Scrolling {
             return scroll_key(k.keysym).map(|(a, s)| Input::ScrollKey(a, s));
         }
-        let alphabet = &self.theme.hint.alphabet;
+        let settings = self.settings();
+        let alphabet = &settings.theme.hint.alphabet;
         let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
         let mut map = self.keymap.lock().await;
         let typed = k
@@ -460,13 +665,14 @@ impl Daemon {
             }
             None => *map.get(&k.keycode)?,
         };
-        Some(Input::Glyph(glyph, self.input.modifiers.mapped(k.mods)))
+        Some(Input::Glyph(glyph, settings.input.modifiers.mapped(k.mods)))
     }
 
     /// The pointer actuator over the overlay's virtual pointer.
     async fn pointer(&self) -> Result<Pointer, ActError> {
         let unavailable = || ActError::Failed(POINTER_UNAVAILABLE.into());
-        if self.input.pointer == PointerKind::None {
+        let input = self.settings().input.clone();
+        if input.pointer == PointerKind::None {
             return Err(unavailable());
         }
         let hypr = self.hypr.clone().ok_or_else(unavailable)?;
@@ -474,7 +680,7 @@ impl Daemon {
             OverlaySlot::Running(h) if h.is_alive() && h.caps().pointer => h.pointer_link(),
             _ => return Err(unavailable()),
         };
-        let backend = match self.input.pointer {
+        let backend = match input.pointer {
             PointerKind::Absolute => Backend::Absolute(AbsoluteBackend {
                 ipc: hypr,
                 pointer: link,
@@ -492,11 +698,11 @@ impl Daemon {
                 pointer: link,
             }),
         };
-        Ok(PointerActuator::new(backend, &self.input))
+        Ok(PointerActuator::new(backend, &input))
     }
 
     fn pointer_status(&self, caps: Option<woints_core::ports::OverlayCaps>) -> String {
-        match (self.input.pointer, caps) {
+        match (self.settings().input.pointer, caps) {
             (PointerKind::None, _) => "unavailable".into(),
             (k, Some(c)) if c.pointer && self.hypr.is_some() => k.as_str().into(),
             _ => "unavailable".into(),
@@ -521,7 +727,27 @@ impl Daemon {
 
     /// Route `action` on `e` to an actuator (design D16) and run it.
     async fn perform(&self, e: &Element, action: Action) -> Result<(), ActError> {
-        match self.routing.route(e, action)? {
+        let route = self.settings().routing.route(e, action)?;
+        if e.source == ElementSource::Quickshell
+            && let Some(qs) = &self.quickshell
+        {
+            match qs.invoke(e, action).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    tracing::info!(element = e.id.0, %action, "quickshell {err}; pointer click");
+                    let a = if Action::POINTER.contains(&action)
+                        && action != Action::Drag
+                        && action != Action::Scroll
+                    {
+                        action
+                    } else {
+                        Action::Click
+                    };
+                    return self.pointer().await?.act(a, e.rect).await;
+                }
+            }
+        }
+        match route {
             ActuatorKind::DoAction | ActuatorKind::GrabFocus => {
                 let r = match &self.actuator {
                     Some(a) => a.act(e, action).await,
@@ -611,23 +837,36 @@ impl Daemon {
         v.clone()
     }
 
-    /// `hypr.query` stage.
-    async fn query(&self, timings: &mut Timings) -> Result<HyprState, String> {
+    /// `hypr.query` stage: what selection for `scope` needs.
+    async fn query(&self, scope: Scope, timings: &mut Timings) -> Result<HyprSnapshot, String> {
         let t = Instant::now();
         let hypr = self.hypr.as_ref().ok_or("not running under Hyprland")?;
         let monitors = self.monitors().await?;
         let active = hypr.active_window().await.map_err(|e| e.to_string())?;
-        let mons: Vec<&Monitor> = monitors.iter().filter(|m| !m.disabled).collect();
-        let state = HyprState {
-            outputs: mons.iter().map(|m| m.geom()).collect(),
-            focused_output: mons
-                .iter()
-                .find(|m| m.focused)
-                .map(|m| OutputId(m.name.clone())),
+        let (clients, layers) = tokio::join!(
+            async {
+                if scope == Scope::All {
+                    hypr.clients().await.map_err(|e| e.to_string())
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+            async {
+                if scope == Scope::Focused {
+                    Ok(Vec::new())
+                } else {
+                    hypr.layers().await.map_err(|e| e.to_string())
+                }
+            }
+        );
+        let snap = HyprSnapshot {
+            monitors,
             active,
+            clients: clients?,
+            layers: layers?,
         };
         timings.record("hypr.query", t.elapsed());
-        Ok(state)
+        Ok(snap)
     }
 
     async fn pipeline(
@@ -635,37 +874,43 @@ impl Daemon {
         scope: Scope,
         action: Option<Action>,
     ) -> Result<pipeline::Output, String> {
+        let settings = self.settings();
         let mut timings = Timings::default();
-        let h = self.query(&mut timings).await?;
+        let h = self.query(scope, &mut timings).await?;
         #[cfg(feature = "vision")]
-        let out = match self.vision_stage().await {
-            Some(v) => {
-                pipeline::run(h, scope, action, &self.theme, timings, &self.provider, &*v).await
-            }
-            None => {
+        let vision = self.vision_stage().await;
+        macro_rules! go {
+            ($layers:expr, $vision:expr) => {
                 pipeline::run(
                     h,
                     scope,
                     action,
-                    &self.theme,
+                    &settings.config,
+                    &settings.theme,
                     timings,
                     &self.provider,
-                    &pipeline::NoVision,
+                    $layers,
+                    $vision,
                 )
                 .await
-            }
+            };
+        }
+        let qs = self
+            .quickshell
+            .as_ref()
+            .filter(|_| settings.config.providers.quickshell.mode != ProviderMode::Off);
+        #[cfg(feature = "vision")]
+        let out = match (qs, vision.as_deref()) {
+            (Some(q), Some(v)) => go!(q, v),
+            (Some(q), None) => go!(q, &pipeline::NoVision),
+            (None, Some(v)) => go!(&NoLayers, v),
+            (None, None) => go!(&NoLayers, &pipeline::NoVision),
         };
         #[cfg(not(feature = "vision"))]
-        let out = pipeline::run(
-            h,
-            scope,
-            action,
-            &self.theme,
-            timings,
-            &self.provider,
-            &pipeline::NoVision,
-        )
-        .await;
+        let out = match qs {
+            Some(q) => go!(q, &pipeline::NoVision),
+            None => go!(&NoLayers, &pipeline::NoVision),
+        };
         let out = out.map_err(|e| e.to_string())?;
         *self.last_collect.lock().await = out.reports.clone();
         Ok(out)
@@ -675,7 +920,7 @@ impl Daemon {
     /// (no surface is mapped) unless `vision.mode = off`.
     #[cfg(feature = "vision")]
     async fn vision_stage(&self) -> Option<Arc<pipeline::Vision>> {
-        if self.config.vision.mode == VisionMode::Off {
+        if self.settings().config.vision.mode == VisionMode::Off {
             return None;
         }
         let none = matches!(&*self.overlay.lock().await, OverlaySlot::None);
@@ -687,7 +932,10 @@ impl Daemon {
 
     pub async fn handle(&self, req: Request) -> Response {
         match req {
-            Request::Hints { scope, action } => self.hints(scope, action).await,
+            Request::Hints { scope, action } => {
+                let scope = scope.unwrap_or(self.settings().config.scope.default);
+                self.hints(scope, action).await
+            }
             Request::Cancel => {
                 self.apply(Input::Cancel).await;
                 Response::with(&StateReply { state: State::Idle })
@@ -698,8 +946,18 @@ impl Daemon {
                 self.shutdown.notify_one();
                 Response::ok()
             }
-            Request::Snapshot { scope } => self.snapshot(scope).await,
-            Request::Bench { iterations, scope } => self.bench(iterations, scope).await,
+            Request::Snapshot { scope } => {
+                let scope = scope.unwrap_or(self.settings().config.scope.default);
+                self.snapshot(scope).await
+            }
+            Request::Bench { iterations, scope } => {
+                let scope = scope.unwrap_or(self.settings().config.scope.default);
+                self.bench(iterations, scope).await
+            }
+            Request::Reload => self.reload().await,
+            Request::Doctor => Response::with(&woints_core::proto::DoctorReply {
+                report: self.doctor().await,
+            }),
             Request::Act {
                 snapshot_id,
                 id,
@@ -746,11 +1004,13 @@ impl Daemon {
             };
             (e, dest)
         };
+        let routing = self.settings().routing;
+        let scroll_step = self.settings().input.scroll_step;
         let r = match (action, dest) {
             (Action::Drag, Some(d)) => {
                 self.recorded(&element, action, async {
-                    self.routing.route(&element, action)?;
-                    self.routing.route(&d, action)?;
+                    routing.route(&element, action)?;
+                    routing.route(&d, action)?;
                     self.pointer()
                         .await?
                         .drag(element.rect.center(), d.rect.center())
@@ -760,10 +1020,10 @@ impl Daemon {
             }
             (Action::Scroll, _) if axis.is_some() || amount.is_some() => {
                 self.recorded(&element, action, async {
-                    self.routing.route(&element, action)?;
+                    routing.route(&element, action)?;
                     let p = self.pointer().await?;
                     p.scroll_enter(element.rect).await?;
-                    let lines = amount.unwrap_or(self.input.scroll_step as i32);
+                    let lines = amount.unwrap_or(scroll_step as i32);
                     p.scroll(axis.unwrap_or_default(), lines).await
                 })
                 .await
@@ -783,7 +1043,7 @@ impl Daemon {
         }
         self.apply(Input::HintsRequested).await;
         let explicit = action.is_some();
-        let action = action.unwrap_or(self.input.default_action);
+        let action = action.unwrap_or(self.settings().input.default_action);
         let mut out = match self.pipeline(scope, Some(action)).await {
             Ok(o) => o,
             Err(e) => return Response::err(e),
@@ -859,6 +1119,7 @@ impl Daemon {
             scene: first_scene,
             labels: out.labels.clone(),
             targets: out.targets,
+            layer: out.layer,
         };
         *self.first.lock().await = Some(shown.clone());
         *self.shown.lock().await = Some(shown);
@@ -928,7 +1189,7 @@ impl Daemon {
             hyprland_version: self.hyprland_version().await,
             overlay,
             last_timings: self.last_timings.lock().await.clone(),
-            providers: vec![self.provider_status()],
+            providers: self.provider_statuses().await,
             last_collect: self.last_collect.lock().await.clone(),
             last_action: self.last_action.lock().await.clone(),
             pointer: self.pointer_status(caps),
@@ -936,18 +1197,78 @@ impl Daemon {
                 Some(_) => "data-control".into(),
                 None => "unavailable".into(),
             },
+            config: self.config_status().await,
         })
     }
 
-    fn provider_status(&self) -> ProviderStatus {
-        match &self.provider {
+    async fn provider_statuses(&self) -> Vec<ProviderStatus> {
+        let mut v = vec![match &self.provider {
             Provider::Atspi(p) => p.status(),
             Provider::Demo(_) => ProviderStatus {
                 name: "demo".into(),
                 available: true,
                 last_error: None,
             },
+        }];
+        if let Some(q) = &self.quickshell {
+            let mut s = q.status().await;
+            if self.settings().config.providers.quickshell.mode == ProviderMode::Off {
+                s.available = false;
+                s.last_error = Some("disabled (providers.quickshell.mode = \"off\")".into());
+            }
+            v.push(s);
         }
+        v
+    }
+
+    pub(crate) async fn overlay_globals(&self) -> Result<Vec<String>, String> {
+        if matches!(&*self.overlay.lock().await, OverlaySlot::None) {
+            self.start_overlay().await.map_err(|e| e.to_string())?;
+        }
+        match &*self.overlay.lock().await {
+            OverlaySlot::Running(h) if h.is_alive() => Ok(h.globals().to_vec()),
+            _ => Err("overlay not running".into()),
+        }
+    }
+
+    pub(crate) async fn active_target(&self) -> Option<Target> {
+        let hypr = self.hypr.as_ref()?;
+        let w = hypr.active_window().await.ok()??;
+        let mons = self.monitors().await.ok()?;
+        let outputs: Vec<_> = mons
+            .iter()
+            .filter(|m| !m.disabled)
+            .map(Monitor::geom)
+            .collect();
+        let focused = mons
+            .iter()
+            .find(|m| m.focused)
+            .map(|m| OutputId(m.name.clone()));
+        Some(woints_hypr::focused_target(&w, &outputs, focused.as_ref()))
+    }
+
+    /// Vision decision for doctor's focused-window lines.
+    pub(crate) async fn vision_decision(&self, usable: usize, target: &Target) -> (bool, String) {
+        #[cfg(feature = "vision")]
+        {
+            let d = woints_vision::decide_vision(
+                &self.settings().config.vision_config(),
+                usable,
+                &target.class,
+                target.surface.is_layer(),
+                usable > 0,
+            );
+            (d.run, d.reason.into())
+        }
+        #[cfg(not(feature = "vision"))]
+        {
+            let _ = (usable, target);
+            (false, "vision_unavailable".into())
+        }
+    }
+
+    pub(crate) async fn hyprland_version_pub(&self) -> Option<String> {
+        self.hyprland_version().await
     }
 
     /// Snapshot + headless render, `iterations` times; never maps a surface.
@@ -984,19 +1305,6 @@ impl Daemon {
             rows: percentiles(&runs),
         })
     }
-}
-
-/// Defaults plus `WOINTS_VISION_MODE` (`fallback`, `always`, `off`) until
-/// the config file arrives in M5.
-fn config_from_env() -> Config {
-    let mut c = Config::default();
-    if let Ok(m) = std::env::var("WOINTS_VISION_MODE") {
-        match serde_json::from_value::<VisionMode>(serde_json::Value::String(m.clone())) {
-            Ok(mode) => c.vision.mode = mode,
-            Err(_) => tracing::warn!("WOINTS_VISION_MODE={m}: expected fallback, always or off"),
-        }
-    }
-    c
 }
 
 /// Nearest-rank percentile of sorted samples.
@@ -1078,7 +1386,87 @@ mod tests {
     }
 
     fn demo() -> Arc<Daemon> {
-        Daemon::with_provider(None, Provider::Demo(DemoProvider), None).0
+        demo_with(None)
+    }
+
+    fn demo_with(path: Option<PathBuf>) -> Arc<Daemon> {
+        let (config, status) = initial_config(path.as_deref());
+        Daemon::with_parts(
+            None,
+            Provider::Demo(DemoProvider),
+            None,
+            None,
+            config,
+            status,
+            path,
+        )
+        .0
+    }
+
+    fn temp_config(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("woints-cfg-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    #[tokio::test]
+    async fn status_config_defaults() {
+        let d = demo();
+        let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
+        assert_eq!(s.config.path, None);
+        assert_eq!(s.config.source, "defaults");
+    }
+
+    #[tokio::test]
+    async fn reload_keeps_last_good() {
+        let p = temp_config("reload", "[hint]\ntheme = \"latte\"\n");
+        let d = demo_with(Some(p.clone()));
+        assert_eq!(
+            d.settings().theme.tokens,
+            woints_core::theme::Tokens::latte()
+        );
+        let loaded_at = d.config_status().await.loaded_at;
+        std::fs::write(&p, "[theme.mocha]\nbg = \"red\"\n").unwrap();
+        let r = d.handle(Request::Reload).await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("theme.mocha.bg: expected #rrggbb or #rrggbbaa")
+        );
+        assert_eq!(
+            d.settings().theme.tokens,
+            woints_core::theme::Tokens::latte()
+        );
+        let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
+        assert!(!s.config.errors.is_empty());
+        assert_eq!(s.config.loaded_at, loaded_at);
+        std::fs::write(&p, "[keys]\nmode = \"explicit\"\nalphabet = \"qwer\"\n").unwrap();
+        let r = d.handle(Request::Reload).await;
+        assert!(r.ok, "{r:?}");
+        let rr: ReloadReply = r.payload().unwrap();
+        assert!(rr.config.errors.is_empty());
+        assert_eq!(d.settings().theme.hint.alphabet, "qwer");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn reload_cancels_on_alphabet_change() {
+        let p = temp_config("cancel", "");
+        let d = demo_with(Some(p.clone()));
+        let id = d.store.lock().await.insert(vec![element(1), element(2)]);
+        d.apply(Input::Shown {
+            snapshot_id: id,
+            labels: vec!["a".into(), "s".into()],
+            action: Action::Click,
+            explicit: false,
+        })
+        .await;
+        assert_eq!(d.state().await, State::Showing);
+        std::fs::write(&p, "[keys]\nmode = \"explicit\"\nalphabet = \"qwer\"\n").unwrap();
+        assert!(d.handle(Request::Reload).await.ok);
+        assert_eq!(d.state().await, State::Idle);
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
     fn element(id: u32) -> Element {

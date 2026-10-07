@@ -3,12 +3,14 @@
 Vimium-style keyboard hints for Hyprland. Press a key binding and letter
 hints appear over interactive elements; type a hint to act on it.
 
-Milestone 3 (this tree) finds real elements through AT-SPI and acts on them
-through AT-SPI or a real pointer: `woints hints` badges the interactive
-elements of the focused GTK3, GTK4 or Qt Widgets window; typing filters the
-badges, Backspace undoes, a full label flashes and performs the session's
-action (click by default). Vision fallback (M4) and quickshell (M4–M5) come
-later. Toolkit findings are in [`docs/toolkits.md`](docs/toolkits.md).
+`woints hints` badges the interactive elements of the focused window (or
+bars, popups and every visible window, see [Scopes](#scopes)); typing filters
+the badges, Backspace undoes, a full label flashes and performs the session's
+action (click by default). Elements come from AT-SPI (GTK3, GTK4, Qt Widgets,
+Firefox chrome), from your quickshell bar through the
+[Woints QML module](integrations/quickshell/README.md), and from a classical
+vision fallback when neither has enough. `woints doctor` explains what works
+on your machine. Toolkit findings are in [`docs/toolkits.md`](docs/toolkits.md).
 
 ## Architecture
 
@@ -34,12 +36,14 @@ later. Toolkit findings are in [`docs/toolkits.md`](docs/toolkits.md).
 | `woints-cli` | `woints` | thin client |
 | `woints-a11y` | | AT-SPI provider and actuator: one zbus connection to the a11y bus, pid/fuzzy pairing, `Collection.GetMatches` or a bounded pipelined walk per toolkit profile, `WINDOW` extents, phantom filters |
 | `woints-input` | | pointer actuator: Hyprland `movecursor` + `zwlr_virtual_pointer_v1` buttons, motion and axis events (or output-local `motion_absolute`) |
-| `woints-vision` | | placeholder for M4 |
+| `woints-vision` | | vision fallback: toplevel export / screencopy capture, classical edge detector |
+| `woints-qs` | | quickshell provider: `qs list` discovery, `qs ipc call woints list/invoke` |
 
 Pipeline stages (each timed, logged at `debug` as `stage=<name> ms=<f32>`):
 `hypr.query → select → collect.connect → collect.match → collect.extents →
-collect.filter → label → place → render → commit`, plus `act` for the last
-action.
+collect.filter` (AT-SPI, toplevels) in parallel with `qs.list` (quickshell,
+layers), then `capture → detect → merge` when vision runs, `label → place →
+render → commit`, plus `act` for the last action.
 
 ## Build
 
@@ -53,25 +57,137 @@ just build | test | lint | run-daemon | dump
 
 ```ini
 exec-once = wointsd
-bind = SUPER, F, exec, woints hints
+
+# Scopes
+bind = SUPER, F, exec, woints hints                          # scope.default (focused)
+bind = SUPER ALT, F, exec, woints hints --scope focused+layers
+bind = SUPER CTRL, F, exec, woints hints --scope layers       # bars, popups only
+bind = SUPER SHIFT CTRL, F, exec, woints hints --scope all    # every visible window + layers
+
+# Actions
 bind = SUPER SHIFT, F, exec, woints hints --action right
+bind = SUPER, M, exec, woints hints --action middle
+bind = SUPER, G, exec, woints hints --action double
+bind = SUPER, V, exec, woints hints --action hover
+bind = SUPER, I, exec, woints hints --action focus
 bind = SUPER, D, exec, woints hints --action drag
 bind = SUPER, S, exec, woints hints --action scroll
+bind = SUPER, Y, exec, woints hints --action copy
 ```
 
+`exec-once` processes inherit Hyprland's environment, so the accessibility
+variables `woints doctor` checks (`NO_AT_BRIDGE`, `QT_LINUX_ACCESSIBILITY_ALWAYS_ON`,
+`ACCESSIBILITY_ENABLED`, ...) must be set where Hyprland starts (`env = ...` in
+`hyprland.conf` or your session wrapper), not in your shell rc. Apps need them
+too, so set them session-wide. A systemd user service sees the systemd user
+environment instead; `doctor` prints the daemon's pid and reads its env.
+
 Verified against Hyprland **0.56.2**.
+
+## NixOS / home-manager
+
+```nix
+# flake.nix inputs
+inputs.woints.url = "github:wochap/woints";
+
+# home-manager module
+{ inputs, pkgs, ... }:
+let
+  woints = inputs.woints.packages.${pkgs.system};
+in {
+  home.packages = [ woints.default ];
+
+  systemd.user.services.wointsd = {
+    Unit = {
+      Description = "woints hint daemon";
+      PartOf = [ "graphical-session.target" ];
+      After = [ "graphical-session.target" ];
+    };
+    Service = {
+      ExecStart = "${woints.default}/bin/wointsd";
+      Restart = "on-failure";
+    };
+    Install.WantedBy = [ "graphical-session.target" ];
+  };
+
+  # Optional: the quickshell module next to your shell.qml
+  xdg.configFile."quickshell/shell/Woints".source =
+    "${woints.quickshell-module}/share/quickshell/Woints";
+
+  # Optional: config (defaults shown in config.example.toml)
+  xdg.configFile."woints/config.toml".text = ''
+    [scope]
+    default = "focused+layers"
+  '';
+
+  home.sessionVariables = {
+    QT_LINUX_ACCESSIBILITY_ALWAYS_ON = "1";
+    ACCESSIBILITY_ENABLED = "1";
+  };
+}
+```
+
+With the systemd service, run `systemctl --user import-environment
+WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR` (Hyprland's
+`dbus-update-activation-environment --systemd --all` does this). On other
+distros, build with `cargo build --release` and use `exec-once = wointsd`.
+
+## Scopes
+
+| scope | targets |
+|---|---|
+| `focused` (default) | the focused window |
+| `focused+layers` | the focused window plus layer surfaces (bars, popups, OSDs) on its output |
+| `layers` | layer surfaces on every output, no windows |
+| `all` | every mapped, non-hidden window on each monitor's active workspace (and a shown special workspace), plus layers on every output |
+
+Layer surfaces come from Hyprland `layers`: levels in `scope.levels`
+(default `bottom`, `top`, `overlay`; bars often live on `bottom`, wallpapers
+on `background` are excluded), minus `scope.ignore_layers` and 1×1
+placeholders. All targets share one label space; window elements get the
+shorter labels, layer elements the longer ones. In `all`, floating windows are
+assumed to be above tiled ones: elements of a tiled window covered by a
+floating window are dropped. Other overlaps between windows are not resolved
+(Hyprland does not expose z-order).
+
+Layer elements come from the quickshell module when the shell imports it,
+else from vision.
 
 ## CLI
 
 ```
-woints hints [--scope focused] [--action <action>]
+woints hints [--scope <scope>] [--action <action>]
 woints cancel | status | quit
-woints snapshot [--scope focused] [--json]
+woints reload                       # re-read config.toml (same as SIGHUP)
+woints doctor [--json]              # exit 1 when a check fails
+woints snapshot [--scope <scope>] [--json]
 woints act --snapshot N --id E [--action <action>] [--to E2] [--axis v|h --amount N]
-woints bench [-n 20]
+woints bench [-n 20] [--scope <scope>]
+wointsd [--config PATH]
 ```
 
-Exit codes: `0` ok, `1` daemon replied `ok:false`, `2` daemon not reachable.
+`--scope` defaults to `scope.default` from the config. Exit codes: `0` ok,
+`1` daemon replied `ok:false` (or `doctor` found a failure), `2` daemon not
+reachable.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/woints/config.toml` (`~/.config/woints/config.toml`), or
+`wointsd --config PATH`. Every key is optional; [`config.example.toml`](config.example.toml)
+lists all defaults. Sections: `[hint]`, `[timing]`, `[chip]`, `[theme.mocha]`,
+`[theme.latte]`, `[keys]`, `[scope]`, `[vision]`, `[merge]`, `[input]`,
+`[actions]`, `[providers.quickshell]`, `[apps]`.
+
+- Reload with `woints reload` or `pkill -HUP wointsd`. A file that fails
+  validation is rejected with the key named (`theme.mocha.bg: expected
+  #rrggbb or #rrggbbaa`) and the previous config stays active; `woints status`
+  and `doctor` show the error. Unknown keys only warn.
+- A reload that changes the label alphabet cancels a session on screen; a
+  colour or layout change redraws it.
+- `keys.mode = "auto"` displays the glyphs your active layout puts on the
+  home-row keys (Colemak-DH shows `arstneiogm`), read from Hyprland `devices`
+  and recompiled on layout switches; `"explicit"` uses `keys.alphabet`.
+  Punctuation is dropped. Keys always match by physical key.
 
 ## Actions
 
@@ -88,8 +204,8 @@ Exit codes: `0` ok, `1` daemon replied `ok:false`, `2` daemon not reachable.
 | `copy` | element text (`Text.GetText`, else its name) to the clipboard as `text/plain;charset=utf-8` | AT-SPI + data control |
 
 Modifiers held on the **final** glyph pick the action: Shift → `right`,
-Ctrl → `middle`, Alt → `hover` (`[modifiers] shift/ctrl/alt/super`, each an
-action or `"none"`). An explicit `--action` wins over modifiers. Glyphs match
+Ctrl → `middle`, Alt → `hover` (`input.modifiers.shift/ctrl/alt/super`, each
+an action or `"none"`). An explicit `--action` wins over modifiers. Glyphs match
 by keycode, so `Shift+d` still matches `d`.
 
 Pointer actions move the cursor with Hyprland `dispatch movecursor x y`
@@ -99,8 +215,8 @@ Wayland connection, each followed by `frame` and a roundtrip. They run only
 after the overlay's unmap has been confirmed. Absolute virtual-pointer motion
 is not used by default (hyprwm/Hyprland#6749); `input.pointer = "absolute"`
 selects output-local `motion_absolute` instead. `input.restore_cursor = true`
-moves the cursor back afterwards (`hover` excepted). `input.prefer =
-"pointer"` skips AT-SPI for `click`/`focus`. ydotool, uinput and the
+moves the cursor back afterwards (`hover` excepted; on by default).
+`input.prefer = "pointer"` skips AT-SPI for `click`/`focus`. ydotool, uinput and the
 RemoteDesktop portal are deliberately not used: they need root-adjacent
 setup or do not exist on Hyprland.
 
@@ -109,8 +225,8 @@ without it, `copy` fails with `clipboard unavailable: ...` and never falls
 back to `wl-copy`. `woints status` shows `pointer` and `clipboard`
 availability.
 
-The `[input]`, `[modifiers]` and `actions.default` keys are constants with
-the defaults above until the config loader lands (M5).
+These are `[input]` keys (`input.modifiers = { shift = "right", ... }`) and
+`actions.default`.
 
 ## Performance
 
@@ -121,7 +237,7 @@ web-content pruning, 18 elements): `collect.connect` 0.01 ms (reused
 connection), `collect.match` 44 ms, `collect.extents` 14 ms,
 `collect.filter` 0.1 ms.
 
-Vision path, `WOINTS_VISION_MODE=always woints bench -n 20 --scope focused`,
+Vision path, `[vision] mode = "always"`, `woints bench -n 20 --scope focused`,
 release build, 7840HS laptop, foot focused at 1438×858 on a 2880×1800 scale 2
 output (150 elements, capped by `vision.max_elements`):
 
@@ -134,11 +250,66 @@ output (150 elements, capped by `vision.max_elements`):
 
 Target total p95 < 300 ms. TODO(verify): the same run on the 5900X desktop.
 
+`woints bench -n 20 --scope focused+layers`, release build, same laptop,
+2026-10-06: footclient focused (no AT-SPI, so vision runs) plus the
+quickshell bar and notification layers without the Woints module (vision
+again, 3 targets, 190 elements):
+
+| stage | p50 ms | p95 ms |
+|---|---:|---:|
+| hypr.query | 0.41 | 0.59 |
+| collect.match | 0.31 | 0.50 |
+| capture | 56.5 | 111.5 |
+| detect | 45.2 | 92.2 |
+| place | 0.51 | 1.12 |
+| render | 15.1 | 26.3 |
+| total | 121.1 | 221.3 |
+
+Vision on three surfaces dominates. TODO(verify): the same run with the
+Woints module imported, where `qs.list` replaces vision on the bar (design
+budget 40 ms; a native IPC client is the follow-up if p95 exceeds ~20 ms).
+
+## Toolkit enablement
+
+| toolkit | what to do | status |
+|---|---|---|
+| GTK3 | unset `NO_AT_BRIDGE` (it disables the bridge); `org.a11y.Status.IsEnabled` / gsettings `toolkit-accessibility = true` helps apps that check it | verified 2026-10-06, GTK 3.24 (absent with `NO_AT_BRIDGE=1`, registers without) |
+| GTK4 | works out of the box; no Collection, tree walk only; `WINDOW` coordinates | verified 2026-10-06, GTK 4.22 |
+| Qt Widgets | `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` | verified 2026-10-06, Qt 6.11 |
+| Qt QML / quickshell | not reachable over AT-SPI (windows never attach to the app root); import the [Woints module](integrations/quickshell/README.md), else vision | verified negative 2026-10-06, quickshell 0.3.1 / Qt 6.11; module TODO(verify) |
+| Electron | `ACCESSIBILITY_ENABLED=1` (or `--force-renderer-accessibility`) | registration verified 2026-10-06, Electron 42; content population TODO(verify) |
+| Chromium | browser chrome only, web content skipped (use Vimium); `--force-renderer-accessibility` | TODO(verify) |
+| Firefox | browser chrome via Collection, web content skipped (use Vimium); page content never SHOWING | verified 2026-10-06, Gecko 152 (chrome); SHOWING issue TODO(verify) |
+| Flutter | not tested | TODO(verify) |
+| Tauri (WebKitGTK) | not tested | TODO(verify) |
+
+Anything without usable AT-SPI elements gets vision hints (`vision.mode`).
+
+## Troubleshooting
+
+Manual M5 checks (quickshell module, layer badges) and decisions awaiting review: [`docs/verify-m5.md`](docs/verify-m5.md).
+
+Start with `woints doctor`; each line maps to a fix:
+
+| doctor line | fix |
+|---|---|
+| `fail NO_AT_BRIDGE=1 disables GTK3 accessibility` | remove `NO_AT_BRIDGE` from the session environment (Hyprland `env`, display manager, home-manager `sessionVariables`) and restart the apps |
+| `fail a11y bus unreachable` | `at-spi2-core` not running: on NixOS `services.gnome.at-spi2-core.enable = true` |
+| `warn org.a11y.Status.IsEnabled = false` | run the printed `busctl` command, or set gsettings `toolkit-accessibility = true` |
+| `warn no a11y app matched` | the app does not speak AT-SPI or lacks its env var (table above); vision covers it |
+| `ok Collection absent (expected for GTK4)` | nothing to do |
+| `warn Qt QML window: not reachable from AT-SPI root` | quickshell or another QML app: import the Woints module, or rely on vision |
+| `fail zwlr_layer_shell_v1 missing` / `zwlr_virtual_pointer_manager_v1 missing` | not Hyprland, or a very old one; woints needs both |
+| `warn ... Woints module not imported` | add the module to that shell (ignore for a lock-screen instance) |
+| `warn qs unavailable` | `qs` not on the daemon's `PATH`; quickshell layers use vision |
+| `fail config error: <key>: ...` | fix the key, then `woints reload` |
+| `warn config: <key>: unknown key` | typo or a key from another version |
+
 ## Debugging
 
 - `RUST_LOG=debug wointsd` logs every stage duration.
 - `WOINTS_DUMP=/tmp/dump wointsd` writes one PNG per output for every rendered frame.
-- `WOINTS_DEMO=1 wointsd` uses the M1 demo boxes instead of AT-SPI.
+- `WOINTS_DEMO=1 wointsd` uses the demo boxes instead of AT-SPI.
 - `woints status` shows provider availability, pairing reason (`pid`,
   `fuzzy`, `no-a11y-app`, `frame-guess`), strategy used, `truncated` and the
   last action.

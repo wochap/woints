@@ -1,0 +1,3 @@
+module Woints
+singleton SHints 1.0 SHints.qml
+Hintable 1.0 Hintable.qml

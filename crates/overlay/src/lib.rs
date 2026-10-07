@@ -33,6 +33,7 @@ pub struct OverlayHandle {
     commands: Sender<Command>,
     alive: Arc<AtomicBool>,
     caps: OverlayCaps,
+    globals: Vec<String>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -226,11 +227,12 @@ pub fn spawn() -> Result<(OverlayHandle, mpsc::UnboundedReceiver<OverlayEvent>),
         })
         .map_err(|e| OverlayError::Other(e.to_string()))?;
     match ready_rx.recv() {
-        Ok(Ok(caps)) => Ok((
+        Ok(Ok((caps, globals))) => Ok((
             OverlayHandle {
                 commands: cmd_tx,
                 alive,
                 caps,
+                globals,
                 thread: Some(thread),
             },
             ev_rx,
@@ -248,6 +250,11 @@ impl OverlayHandle {
     /// Virtual pointer and clipboard availability, fixed at start-up.
     pub fn caps(&self) -> OverlayCaps {
         self.caps
+    }
+
+    /// Interface names the compositor advertised at start-up.
+    pub fn globals(&self) -> &[String] {
+        &self.globals
     }
 
     pub fn capture_link(&self) -> CaptureLink {

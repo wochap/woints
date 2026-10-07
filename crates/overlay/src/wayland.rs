@@ -189,11 +189,14 @@ pub(crate) struct State {
 pub(crate) fn run(
     commands: Channel<Command>,
     events: mpsc::UnboundedSender<OverlayEvent>,
-    ready: std::sync::mpsc::Sender<Result<OverlayCaps, String>>,
+    ready: std::sync::mpsc::Sender<Result<(OverlayCaps, Vec<String>), String>>,
 ) -> Result<(), String> {
-    let setup = || -> Result<(EventLoop<'static, State>, State), String> {
+    let setup = || -> Result<(EventLoop<'static, State>, State, Vec<String>), String> {
         let conn = Connection::connect_to_env().map_err(|e| format!("wayland connect: {e}"))?;
         let (globals, queue) = registry_queue_init::<State>(&conn).map_err(|e| e.to_string())?;
+        let advertised: Vec<String> = globals
+            .contents()
+            .with_list(|l| l.iter().map(|g| g.interface.clone()).collect());
         let qh = queue.handle();
         let event_loop: EventLoop<'static, State> =
             EventLoop::try_new().map_err(|e| e.to_string())?;
@@ -214,12 +217,12 @@ pub(crate) fn run(
                 ChannelEvent::Closed => state.signal.stop(),
             })
             .map_err(|e| e.to_string())?;
-        Ok((event_loop, state))
+        Ok((event_loop, state, advertised))
     };
     let (mut event_loop, mut state) = match setup() {
-        Ok(v) => {
-            let _ = ready.send(Ok(v.1.caps()));
-            v
+        Ok((l, s, advertised)) => {
+            let _ = ready.send(Ok((s.caps(), advertised)));
+            (l, s)
         }
         Err(e) => {
             let _ = ready.send(Err(e.clone()));

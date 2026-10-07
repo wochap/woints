@@ -3,6 +3,7 @@
 
 pub mod act;
 pub mod config;
+pub mod doctor;
 pub mod geom;
 pub mod labels;
 pub mod merge;

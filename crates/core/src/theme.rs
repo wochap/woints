@@ -21,12 +21,13 @@ impl Color {
         }
     }
 
+    /// `#rrggbb` or `#rrggbbaa`; badges are opaque, so alpha is accepted and dropped.
     pub fn parse(s: &str) -> Option<Self> {
         let h = s.strip_prefix('#')?;
-        if h.len() != 6 {
+        if !(h.len() == 6 || h.len() == 8) || !h.chars().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
-        u32::from_str_radix(h, 16).ok().map(Self::hex)
+        u32::from_str_radix(&h[..6], 16).ok().map(Self::hex)
     }
 }
 
@@ -51,6 +52,7 @@ impl<'de> Deserialize<'de> for Color {
 
 /// `hint.*` colour tokens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tokens {
     pub bg: Color,
     pub fg: Color,
@@ -118,9 +120,21 @@ pub enum SizeUnit {
     Mm,
 }
 
+/// Which `[theme.*]` palette badges use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeName {
+    #[default]
+    Mocha,
+    Latte,
+}
+
 /// `[hint]` layout defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HintLayout {
+    pub font: String,
+    pub font_weight: u16,
     /// Em size in logical px.
     pub size: f32,
     pub min_size: f32,
@@ -134,6 +148,8 @@ pub struct HintLayout {
     pub offset: [i32; 2],
     pub gap: i32,
     pub center_below: i32,
+    /// Display alphabet, resolved from `[keys]` (not a `[hint]` key).
+    #[serde(skip)]
     pub alphabet: String,
     pub uppercase: bool,
     /// Glyph advance as a fraction of the em size (monospace).
@@ -142,11 +158,16 @@ pub struct HintLayout {
     pub eliminated: Eliminated,
     /// Dash pattern of vision badge borders and outlines, logical px.
     pub vision_dash: [f32; 2],
+    pub outline: bool,
+    pub outline_width: i32,
+    pub theme: ThemeName,
 }
 
 impl Default for HintLayout {
     fn default() -> Self {
         Self {
+            font: "Atkinson Hyperlegible Mono".into(),
+            font_weight: 700,
             size: 11.0,
             min_size: 10.0,
             size_unit: SizeUnit::Logical,
@@ -163,6 +184,9 @@ impl Default for HintLayout {
             prefix_style: PrefixStyle::HighlightMatched,
             eliminated: Eliminated::Hide,
             vision_dash: [2.0, 2.0],
+            outline: false,
+            outline_width: 1,
+            theme: ThemeName::Mocha,
         }
     }
 }
@@ -197,6 +221,7 @@ pub enum Corner {
 
 /// `[chip]` defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChipLayout {
     pub corner: Corner,
     pub inset: i32,
@@ -215,6 +240,7 @@ impl Default for ChipLayout {
 
 /// `[timing]` defaults plus the showing watchdog.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TimingLayout {
     pub appear_ms: u32,
     pub fade_ms: u32,
@@ -283,6 +309,9 @@ mod tests {
         assert_eq!(format!("{:?}", Tokens::mocha().bg), "#11111b");
         assert_eq!(Color::parse("#cdd6f4"), Some(Tokens::mocha().fg));
         assert_eq!(Tokens::latte().accent, Color::hex(0x8839ef));
+        assert_eq!(Color::parse("#cdd6f4cc"), Some(Tokens::mocha().fg));
+        assert_eq!(Color::parse("red"), None);
+        assert_eq!(Color::parse("#12345g"), None);
     }
 
     #[test]
