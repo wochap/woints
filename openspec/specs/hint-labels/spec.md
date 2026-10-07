@@ -44,3 +44,21 @@ Label generation and placement SHALL be pure functions in `core` with no Wayland
 #### Scenario: Tests run headless
 - **WHEN** `cargo test -p woints-core` runs without a Wayland display
 - **THEN** all label and placement tests pass
+
+### Requirement: Layer targets rank last
+Priority ordering SHALL place every element of a `Target::Layer` after every element of a `Target::Toplevel`, regardless of area or distance.
+
+#### Scenario: Large bar button vs small window button
+- **WHEN** the bar has a 200×40 element and the focused window has a 16×16 element
+- **THEN** the window element gets the shorter label
+
+### Requirement: Display alphabet by keys.mode
+With `keys.mode = "auto"` the label alphabet SHALL be the glyphs the active xkb keymap produces for the physical home-row keycodes (38,39,40,41,44,45,46,47 then 42,43 as extras), minus `keys.exclude` and any non-alphanumeric glyph; with `keys.mode = "explicit"` it SHALL be `keys.alphabet`. Key matching SHALL always be by keycode.
+
+#### Scenario: Colemak-DH
+- **WHEN** `keys.mode = "auto"` and the active layout is Colemak-DH
+- **THEN** labels display `arstneio` glyphs and pressing the physical `s` key (keycode 39) matches the label shown as `r`
+
+#### Scenario: Punctuation excluded
+- **WHEN** the layout yields `;` for keycode 47
+- **THEN** `;` is dropped from the alphabet

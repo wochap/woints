@@ -92,3 +92,14 @@ Each element in a `snapshot` reply SHALL include `actions: [string]`.
 #### Scenario: CLI drag
 - **WHEN** `woints hints --action drag` runs
 - **THEN** the request sent is `{"cmd":"hints","scope":"<default>","action":"drag"}`
+
+### Requirement: reload and doctor commands
+The protocol SHALL add `reload` (reply `{"ok":true,"config":{...}}` or `{"ok":false,"error"}`) and `doctor` (reply `{"ok":true,"report":{...}}` with the grouped checks). `status` SHALL include `config: {path, source, loaded_at, errors[]}`.
+
+#### Scenario: doctor over socket
+- **WHEN** `{"cmd":"doctor"}` is received
+- **THEN** the reply contains `report.environment`, `report.a11y`, `report.focused`, `report.wayland`, `report.quickshell`, `report.hyprland`, `report.config`
+
+#### Scenario: status config
+- **WHEN** `{"cmd":"status"}` is received after a failed reload
+- **THEN** `config.errors` is non-empty and `config.loaded_at` is the time of the last successful load
