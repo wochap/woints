@@ -58,3 +58,35 @@ When `hint.size_unit = "mm"`, the overlay SHALL derive the badge font size from 
 #### Scenario: Missing physical size
 - **WHEN** an output reports `0 × 0` mm
 - **THEN** that output uses logical sizing and a warning is logged once
+
+### Requirement: Drag source pinned
+In drag phase 2 the overlay SHALL draw the source badge filled with `hint.drag_bg` and text `hint.drag_fg`, keep its label text, and draw a 1 px `hint.drag_bg` outline around the source target rect; destination badges use the idle style.
+
+#### Scenario: Phase 2 render
+- **WHEN** the session enters `ShowingSecond`
+- **THEN** exactly one badge uses `drag_bg` and the outline rect equals the source element rect
+
+### Requirement: Scroll stroke and rail
+In scroll mode the overlay SHALL hide all badges, draw a 2 px `hint.scroll` stroke inset 1 px around the container rect, and, when the container exposes a scrollbar `Value` (current, minimum, maximum), draw a 3 px rail at the container's right edge with a thumb whose length is `viewport / content` of the rail and whose position follows the value. Without a `Value` the rail is omitted.
+
+#### Scenario: Scroll stroke
+- **WHEN** the session enters `Scrolling` on a container at `(100, 100, 400, 300)`
+- **THEN** a 2 px stroke is drawn at `(101, 101, 398, 298)` and no badges are visible
+
+#### Scenario: No scrollbar value
+- **WHEN** the container is a vision element
+- **THEN** the stroke is drawn and no rail
+
+### Requirement: Mode chip states for actions
+The chip SHALL show the mode text per design §05: `click`, `right-click`, `middle`, `double`, `hover`, `focus`, `drag 1/2 · pick source`, `drag 2/2 · pick destination` with a peach square, `scroll · hjkl ←↓↑→`, `copy-text`, plus the typed buffer and scope.
+
+#### Scenario: Drag phase 2 chip
+- **WHEN** the session is `ShowingSecond`
+- **THEN** the chip reads `drag 2/2` with sub-text `pick destination` and shows the peach square
+
+### Requirement: Unmap confirmation
+The overlay thread SHALL answer `hide` with an `Unmapped` message after the destroying/unmapping commits have been flushed to the compositor, so the daemon can sequence pointer events.
+
+#### Scenario: Hide round trip
+- **WHEN** the daemon sends `hide`
+- **THEN** it receives `Unmapped` after `wl_display.flush` returns for the commit that removed the surfaces

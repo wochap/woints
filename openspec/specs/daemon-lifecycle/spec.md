@@ -57,3 +57,25 @@ The repository SHALL provide a `flake.nix` with `devShells.default` (Rust stable
 #### Scenario: Status after collection
 - **WHEN** `status` runs after a `hints` on a Qt app
 - **THEN** it shows `atspi: available`, `paired: pid`, `used: collection`, `truncated: false`
+
+### Requirement: Additional session states
+The session FSM SHALL add `ShowingSecond { snapshot_id, source: ElementId, typed }` and `Scrolling { snapshot_id, target: ElementId }`. Transitions: `Showing --drag source chosen--> ShowingSecond`; `ShowingSecond --Esc--> Showing` (original labels); `ShowingSecond --destination chosen--> Idle` after the drag; `Showing --scroll container chosen--> Scrolling`; `Scrolling --Esc--> Idle`; `Scrolling --Tab--> Showing`. `hints` or `cancel` in any state SHALL return to `Idle` first.
+
+#### Scenario: Drag transitions
+- **WHEN** a drag session chooses a source and then a destination
+- **THEN** the states visited are `Showing → ShowingSecond → Idle`
+
+#### Scenario: Cancel during scrolling
+- **WHEN** `cancel` arrives while `Scrolling`
+- **THEN** the overlay unmaps and the state is `Idle`
+
+#### Scenario: Watchdog in phase 2
+- **WHEN** `ShowingSecond` lasts longer than `timing.max_showing_ms`
+- **THEN** the session returns to `Idle` and no button has been pressed
+
+### Requirement: Actuator availability in status
+`status` SHALL report `pointer: "movecursor" | "absolute" | "unavailable"` and `clipboard: "data-control" | "unavailable"`.
+
+#### Scenario: Status with pointer
+- **WHEN** the virtual pointer manager is bound
+- **THEN** `status.pointer` is the configured backend name

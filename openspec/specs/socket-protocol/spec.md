@@ -47,22 +47,15 @@ The `woints` binary SHALL map subcommands `hints [--scope S] [--action A]`, `can
 - **THEN** it prints `wointsd is not running (socket: <path>)` to stderr and exits 2
 
 ### Requirement: act command
-The protocol SHALL support `{"cmd":"act","snapshot_id":N,"id":E,"action":"activate|focus|left|right|middle|double|hover"}`. The daemon resolves the element from its snapshot store and invokes the actuator chain without showing the overlay. Unknown snapshot ids or element ids SHALL yield `ok:false`.
+The protocol SHALL support `{"cmd":"act","snapshot_id":N,"id":E,"action":A}` with `A` from the `action-modes` vocabulary. The daemon resolves the element from its snapshot store and invokes the actuator chain without showing the overlay. Unknown snapshot ids or element ids SHALL yield `ok:false`.
 
 #### Scenario: Activate from snapshot
-- **WHEN** `snapshot` returned id 17 with element 3 tagged `activate` and `{"cmd":"act","snapshot_id":17,"id":3,"action":"activate"}` arrives
-- **THEN** the reply is `{"ok":true,"performed":"activate"}` and `DoAction` was called once
+- **WHEN** `snapshot` returned id 17 with element 3 supporting `click` via AT-SPI and `{"cmd":"act","snapshot_id":17,"id":3,"action":"click"}` arrives
+- **THEN** the reply is `{"ok":true,"performed":"click"}` and `DoAction` was called once
 
 #### Scenario: Expired snapshot
 - **WHEN** `act` references a snapshot id no longer in the store
 - **THEN** the reply is `{"ok":false,"error":"unknown snapshot 17"}`
-
-### Requirement: hints action parameter
-`hints` SHALL accept `action` (default `activate`); the session uses it when a label is matched. In M2 only `activate` and `focus` succeed; others return `NeedsPointer`.
-
-#### Scenario: Default action
-- **WHEN** `{"cmd":"hints","scope":"focused"}` arrives
-- **THEN** the session action is `activate`
 
 ### Requirement: CLI act
 `woints act --snapshot N --id E [--action A]` SHALL map to the `act` command and print the result.
@@ -70,3 +63,32 @@ The protocol SHALL support `{"cmd":"act","snapshot_id":N,"id":E,"action":"activa
 #### Scenario: CLI
 - **WHEN** `woints act --snapshot 17 --id 3` runs
 - **THEN** it sends the `act` request and exits 0 on `ok:true`
+
+### Requirement: Action parameter on hints and act
+`hints` SHALL accept an optional `action` (one of the `action-modes` strings, default `click`). `act` SHALL accept `{"cmd":"act","snapshot_id":N,"id":E,"action":A}` and, for `drag`, an additional `"to": E2`; for `scroll` an additional `"axis":"vertical"|"horizontal","amount":<int lines>`. Unsupported combinations SHALL return an error naming the element's supported actions.
+
+#### Scenario: act drag
+- **WHEN** `{"cmd":"act","snapshot_id":7,"id":3,"action":"drag","to":9}` is received
+- **THEN** the drag sequence from element 3 to element 9 runs without showing the overlay and the reply is `{"ok":true}`
+
+#### Scenario: act unsupported
+- **WHEN** `act` requests `focus` on a vision element
+- **THEN** the reply is `{"ok":false,"error":"element 3 does not support focus; supported: click,right,middle,double,hover,drag,scroll"}`
+
+#### Scenario: act scroll
+- **WHEN** `{"cmd":"act","snapshot_id":7,"id":3,"action":"scroll","axis":"vertical","amount":-3}` is received
+- **THEN** three lines of upward scroll are sent at element 3's centre
+
+### Requirement: Snapshot lists element actions
+Each element in a `snapshot` reply SHALL include `actions: [string]`.
+
+#### Scenario: Snapshot element
+- **WHEN** `snapshot` runs on a window with a GTK3 button
+- **THEN** that element's JSON contains `"actions":["click","right","middle","double","hover","focus","drag","scroll","copy"]`
+
+### Requirement: CLI --action
+`woints hints` SHALL accept `--action <a>` and `woints act --snapshot N --id E --action A [--to E2] [--axis v|h --amount N]`, mapping one-to-one onto the protocol.
+
+#### Scenario: CLI drag
+- **WHEN** `woints hints --action drag` runs
+- **THEN** the request sent is `{"cmd":"hints","scope":"<default>","action":"drag"}`
