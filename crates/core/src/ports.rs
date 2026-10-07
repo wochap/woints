@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::geom::{Global, OutputGeom, OutputId, Rect};
 use crate::model::{Action, Element, Scope, Target, Timings};
 use crate::theme::Theme;
+use crate::vision::Frame;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SelectError {
@@ -80,6 +81,25 @@ pub trait ElementProvider {
     ) -> impl Future<Output = Result<Collected, ProviderError>> + Send;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CaptureError {
+    /// The compositor cannot capture this target (failed, unmapped, protocol missing).
+    #[error("capture unavailable: {0}")]
+    Unavailable(String),
+    #[error("capture timed out")]
+    Timeout,
+}
+
+/// Captures one target as an RGBA [`Frame`] (design D13). `outputs` is the
+/// Hyprland layout used to place region captures.
+pub trait FrameCapture {
+    fn capture(
+        &self,
+        target: &Target,
+        outputs: &[OutputGeom],
+    ) -> impl Future<Output = Result<Frame, CaptureError>> + Send;
+}
+
 /// How a badge is drawn while the user types.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -105,6 +125,9 @@ pub struct Badge {
     pub matched: usize,
     #[serde(default)]
     pub style: BadgeStyle,
+    /// Element came from vision: dashed `hint.vision` border and outline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<Rect<Global>>,
 }
 
 /// The mode chip contents (design §05).

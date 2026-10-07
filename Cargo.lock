@@ -1933,6 +1933,7 @@ dependencies = [
  "woints-hypr",
  "woints-input",
  "woints-overlay",
+ "woints-vision",
 ]
 
 [[package]]
@@ -1964,15 +1965,18 @@ dependencies = [
 name = "woints-overlay"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.13.2",
  "fontdue",
  "smithay-client-toolkit",
  "thiserror 2.0.21",
  "tiny-skia",
  "tokio",
  "tracing",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+ "wayland-scanner",
  "woints-core",
  "woints-hypr",
 ]
@@ -1981,6 +1985,8 @@ dependencies = [
 name = "woints-vision"
 version = "0.1.0"
 dependencies = [
+ "tokio",
+ "tracing",
  "woints-core",
 ]
 

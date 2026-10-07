@@ -8,6 +8,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 
 use woints_a11y::{A11yConnection, AtspiActuator, AtspiProvider};
 use woints_core::act::{ActuatorKind, ActuatorRouting, Axis, InputConfig, PointerKind};
+use woints_core::config::{Config, VisionMode};
 use woints_core::geom::{OutputId, pick_output};
 use woints_core::model::{Action, Element, ElementId, Scope, Target, Timings};
 use woints_core::ports::{
@@ -87,6 +88,8 @@ const SHOW_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct Daemon {
     pub started: Instant,
     pub theme: Theme,
+    #[cfg_attr(not(feature = "vision"), allow(dead_code))]
+    pub config: Config,
     pub input: InputConfig,
     routing: ActuatorRouting,
     hypr: Option<Hypr>,
@@ -101,6 +104,9 @@ pub struct Daemon {
     last_action: Mutex<Option<ActionOutcome>>,
     renderer: Mutex<Renderer>,
     provider: Provider,
+    /// Vision over the running overlay's capture link; rebuilt with the overlay.
+    #[cfg(feature = "vision")]
+    vision: Mutex<Option<Arc<pipeline::Vision>>>,
     actuator: Option<AtspiActuator>,
     shown: Mutex<Option<Shown>>,
     /// Phase 1 of the current session, restored by Escape (drag) or Tab (scroll).
@@ -142,6 +148,7 @@ impl Daemon {
         let d = Arc::new(Self {
             started: Instant::now(),
             theme: Theme::default(),
+            config: config_from_env(),
             routing: ActuatorRouting {
                 prefer: input.prefer,
             },
@@ -158,6 +165,8 @@ impl Daemon {
             last_action: Mutex::new(None),
             renderer: Mutex::new(Renderer::new()),
             provider,
+            #[cfg(feature = "vision")]
+            vision: Mutex::new(None),
             actuator,
             shown: Mutex::new(None),
             first: Mutex::new(None),
@@ -180,6 +189,13 @@ impl Daemon {
                 }
             }
         });
+        #[cfg(feature = "vision")]
+        {
+            *self.vision.lock().await = Some(Arc::new(pipeline::Vision::new(
+                handle.capture_link(),
+                &self.config,
+            )));
+        }
         *self.overlay.lock().await = OverlaySlot::Running(handle);
         tracing::info!("overlay thread running");
         Ok(())
@@ -621,11 +637,52 @@ impl Daemon {
     ) -> Result<pipeline::Output, String> {
         let mut timings = Timings::default();
         let h = self.query(&mut timings).await?;
-        let out = pipeline::run(h, scope, action, &self.theme, timings, &self.provider)
-            .await
-            .map_err(|e| e.to_string())?;
+        #[cfg(feature = "vision")]
+        let out = match self.vision_stage().await {
+            Some(v) => {
+                pipeline::run(h, scope, action, &self.theme, timings, &self.provider, &*v).await
+            }
+            None => {
+                pipeline::run(
+                    h,
+                    scope,
+                    action,
+                    &self.theme,
+                    timings,
+                    &self.provider,
+                    &pipeline::NoVision,
+                )
+                .await
+            }
+        };
+        #[cfg(not(feature = "vision"))]
+        let out = pipeline::run(
+            h,
+            scope,
+            action,
+            &self.theme,
+            timings,
+            &self.provider,
+            &pipeline::NoVision,
+        )
+        .await;
+        let out = out.map_err(|e| e.to_string())?;
         *self.last_collect.lock().await = out.reports.clone();
         Ok(out)
+    }
+
+    /// The vision stage, starting the overlay thread for its capture link
+    /// (no surface is mapped) unless `vision.mode = off`.
+    #[cfg(feature = "vision")]
+    async fn vision_stage(&self) -> Option<Arc<pipeline::Vision>> {
+        if self.config.vision.mode == VisionMode::Off {
+            return None;
+        }
+        let none = matches!(&*self.overlay.lock().await, OverlaySlot::None);
+        if none && let Err(e) = self.start_overlay().await {
+            tracing::warn!("vision: overlay start failed: {e}");
+        }
+        self.vision.lock().await.clone()
     }
 
     pub async fn handle(&self, req: Request) -> Response {
@@ -720,6 +777,10 @@ impl Daemon {
     }
 
     async fn hints(&self, scope: Scope, action: Option<Action>) -> Response {
+        // Keep woints out of captured frames (design D14): unmap first.
+        if self.shown.lock().await.is_some() {
+            self.hide_overlay_and_wait().await;
+        }
         self.apply(Input::HintsRequested).await;
         let explicit = action.is_some();
         let action = action.unwrap_or(self.input.default_action);
@@ -747,6 +808,7 @@ impl Daemon {
                 state: State::Idle,
                 targets: None,
                 elements: 0,
+                vision: None,
             });
         }
 
@@ -790,6 +852,7 @@ impl Daemon {
 
         let n_targets = out.targets.len();
         let n_elements = out.elements.len();
+        let vision = out.vision.clone();
         let id = self.store.lock().await.insert(out.elements);
         *self.last_timings.lock().await = out.timings;
         let shown = Shown {
@@ -819,6 +882,7 @@ impl Daemon {
             state: self.state().await,
             targets: Some(n_targets),
             elements: n_elements,
+            vision: Some(vision),
         })
     }
 
@@ -831,6 +895,7 @@ impl Daemon {
                     targets: o.targets,
                     elements: o.elements,
                     timings: o.timings,
+                    vision: o.vision,
                 })
             }
             Err(e) => Response::err(e),
@@ -919,6 +984,19 @@ impl Daemon {
             rows: percentiles(&runs),
         })
     }
+}
+
+/// Defaults plus `WOINTS_VISION_MODE` (`fallback`, `always`, `off`) until
+/// the config file arrives in M5.
+fn config_from_env() -> Config {
+    let mut c = Config::default();
+    if let Ok(m) = std::env::var("WOINTS_VISION_MODE") {
+        match serde_json::from_value::<VisionMode>(serde_json::Value::String(m.clone())) {
+            Ok(mode) => c.vision.mode = mode,
+            Err(_) => tracing::warn!("WOINTS_VISION_MODE={m}: expected fallback, always or off"),
+        }
+    }
+    c
 }
 
 /// Nearest-rank percentile of sorted samples.

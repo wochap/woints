@@ -230,6 +230,11 @@ fn print_human(req: &Request, resp: &Response) {
                     s.targets.len(),
                     s.elements.len()
                 );
+                println!(
+                    "vision: {} ({})",
+                    if s.vision.ran { "ran" } else { "skipped" },
+                    s.vision.reason
+                );
             }
         }
         Request::Act { .. } => match resp.payload::<ActReply>() {

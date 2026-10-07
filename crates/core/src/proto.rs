@@ -10,6 +10,7 @@ use crate::act::Axis;
 use crate::geom::{Global, OutputId, Rect};
 use crate::model::{Action, Element, ElementId, Scope, Target, Timings};
 use crate::ports::CollectReport;
+use crate::vision::VisionReport;
 
 /// Socket file name under `$XDG_RUNTIME_DIR`.
 pub const SOCKET_NAME: &str = "woints.sock";
@@ -149,6 +150,8 @@ pub struct HintsReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<usize>,
     pub elements: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<VisionReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -219,6 +222,8 @@ pub struct SnapshotReply {
     pub targets: Vec<Target>,
     pub elements: Vec<Element>,
     pub timings: Timings,
+    #[serde(default)]
+    pub vision: VisionReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -370,6 +375,7 @@ mod tests {
             state: State::Showing,
             targets: Some(1),
             elements: 5,
+            vision: None,
         });
         let v: Value = serde_json::from_str(&r.to_line()).unwrap();
         assert_eq!(
@@ -380,11 +386,29 @@ mod tests {
             state: State::Idle,
             targets: None,
             elements: 0,
+            vision: None,
         });
         assert_eq!(
             serde_json::to_value(&idle).unwrap(),
             json!({"ok":true,"state":"idle","elements":0})
         );
+    }
+
+    #[test]
+    fn snapshot_vision_field() {
+        let r = SnapshotReply {
+            snapshot_id: 1,
+            targets: vec![],
+            elements: vec![],
+            timings: Timings::default(),
+            vision: VisionReport {
+                ran: true,
+                reason: "too_few_atspi".into(),
+            },
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["vision"], json!({"ran": true, "reason": "too_few_atspi"}));
+        assert_eq!(serde_json::from_value::<SnapshotReply>(v).unwrap(), r);
     }
 
     #[test]

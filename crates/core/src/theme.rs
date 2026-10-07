@@ -140,6 +140,8 @@ pub struct HintLayout {
     pub advance_em: f32,
     pub prefix_style: PrefixStyle,
     pub eliminated: Eliminated,
+    /// Dash pattern of vision badge borders and outlines, logical px.
+    pub vision_dash: [f32; 2],
 }
 
 impl Default for HintLayout {
@@ -160,6 +162,7 @@ impl Default for HintLayout {
             advance_em: 0.6,
             prefix_style: PrefixStyle::HighlightMatched,
             eliminated: Eliminated::Hide,
+            vision_dash: [2.0, 2.0],
         }
     }
 }

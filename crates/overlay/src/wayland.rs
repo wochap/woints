@@ -63,6 +63,7 @@ use woints_core::ports::{
     CommitTimings, KeyPress, Modifiers, OverlayCaps, OverlayError, OverlayEvent, Scene,
 };
 
+use crate::capture::{CaptureReply, CaptureReq, Capturer};
 use crate::render::{OutputSurface, Renderer, dump_if_requested, to_argb8888};
 
 pub(crate) enum Command {
@@ -78,6 +79,8 @@ pub(crate) enum Command {
     Pointer(PointerOp, oneshot::Sender<Result<(), String>>),
     /// Set the clipboard selection to `text/plain;charset=utf-8` text.
     Clipboard(String, oneshot::Sender<Result<(), String>>),
+    /// Capture one frame (design D13); replies when ready or failed.
+    Capture(CaptureReq, CaptureReply),
     Shutdown,
 }
 
@@ -167,6 +170,7 @@ pub(crate) struct State {
     clip_device: Option<ClipDevice>,
     clip_source: Option<ClipSource>,
     clip_text: Arc<String>,
+    pub(crate) capturer: Capturer,
     started: Instant,
 
     renderer: Renderer,
@@ -176,7 +180,7 @@ pub(crate) struct State {
     events: mpsc::UnboundedSender<OverlayEvent>,
     warned_mm: Vec<OutputId>,
     signal: LoopSignal,
-    qh: QueueHandle<State>,
+    pub(crate) qh: QueueHandle<State>,
     display: wl_display::WlDisplay,
 }
 
@@ -273,6 +277,7 @@ impl State {
         if data_control.is_none() {
             tracing::info!("no data control protocol advertised; copy disabled");
         }
+        let capturer = Capturer::bind(globals, qh, &shm);
         Ok(Self {
             registry: RegistryState::new(globals),
             outputs: OutputState::new(globals, qh),
@@ -292,6 +297,7 @@ impl State {
             clip_device: None,
             clip_source: None,
             clip_text: Arc::new(String::new()),
+            capturer,
             started: Instant::now(),
             renderer: Renderer::new(),
             scene: None,
@@ -339,6 +345,7 @@ impl State {
             Command::Clipboard(text, reply) => {
                 let _ = reply.send(self.set_clipboard(text));
             }
+            Command::Capture(req, reply) => self.capture(req, reply),
             Command::Shutdown => {
                 self.hide();
                 self.signal.stop();
@@ -460,7 +467,7 @@ impl State {
         }
     }
 
-    fn find_output(&self, id: &OutputId) -> Option<wl_output::WlOutput> {
+    pub(crate) fn find_output(&self, id: &OutputId) -> Option<wl_output::WlOutput> {
         self.outputs
             .outputs()
             .find(|o| self.outputs.info(o).and_then(|i| i.name).as_deref() == Some(id.0.as_str()))

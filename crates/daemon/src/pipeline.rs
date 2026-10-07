@@ -1,5 +1,6 @@
 //! One pass: `hypr.query → select → collect → label → place → render → commit`.
 
+use std::future::Future;
 use std::time::{Duration, Instant};
 
 use tracing::Instrument;
@@ -9,6 +10,7 @@ use woints_core::geom::{
     window_to_global,
 };
 use woints_core::labels::{PriorityItem, assign, labels, priority};
+use woints_core::merge::{MergeParams, merge};
 use woints_core::model::{Action, Element, ElementId, ElementSource, Scope, Target, Timings};
 use woints_core::place::{PlaceInput, badge_size, place};
 use woints_core::ports::{
@@ -16,6 +18,7 @@ use woints_core::ports::{
     ProviderError, Scene, SelectError,
 };
 use woints_core::theme::Theme;
+use woints_core::vision::VisionReport;
 use woints_hypr::{Client, focused_target};
 
 /// Time one provider may spend on one target (design D17).
@@ -31,6 +34,92 @@ pub struct Output {
     pub scene: Scene,
     pub timings: Timings,
     pub reports: Vec<CollectReport>,
+    pub vision: VisionReport,
+}
+
+/// The vision fallback as the pipeline sees it (design D18): a policy
+/// decision per target, then capture → detect.
+pub trait VisionStage: Sync {
+    /// Whether vision runs for `target` given `atspi` usable elements, and why.
+    fn decide(&self, atspi: usize, target: &Target, served: bool) -> (bool, &'static str);
+    fn collect(
+        &self,
+        target: &Target,
+        outputs: &[OutputGeom],
+    ) -> impl Future<Output = Result<Collected, ProviderError>> + Send;
+    fn merge_params(&self) -> MergeParams;
+}
+
+/// No vision: built without the `vision` feature or no capture backend.
+pub struct NoVision;
+
+impl VisionStage for NoVision {
+    fn decide(&self, _: usize, _: &Target, _: bool) -> (bool, &'static str) {
+        (false, "vision_unavailable")
+    }
+    async fn collect(&self, _: &Target, _: &[OutputGeom]) -> Result<Collected, ProviderError> {
+        Err(ProviderError::Unavailable("vision".into()))
+    }
+    fn merge_params(&self) -> MergeParams {
+        MergeParams::default()
+    }
+}
+
+/// Vision provider over the overlay's capture link plus merge parameters.
+#[cfg(feature = "vision")]
+pub struct Vision {
+    pub provider: woints_vision::VisionProvider<
+        woints_vision::CompositeCapture<
+            woints_overlay::ToplevelExportCapture,
+            woints_overlay::ScreencopyRegionCapture,
+        >,
+    >,
+    pub merge: MergeParams,
+}
+
+#[cfg(feature = "vision")]
+impl Vision {
+    pub fn new(link: woints_overlay::CaptureLink, config: &woints_core::config::Config) -> Self {
+        let capture = woints_vision::CompositeCapture {
+            toplevel: woints_overlay::ToplevelExportCapture(link.clone()),
+            region: woints_overlay::ScreencopyRegionCapture(link),
+            timeout: Duration::from_millis(config.vision.budget_ms),
+        };
+        Self {
+            provider: woints_vision::VisionProvider::new(
+                capture,
+                Box::new(woints_vision::ClassicalDetector::new()),
+                config.vision.clone(),
+            ),
+            merge: config.merge,
+        }
+    }
+}
+
+#[cfg(feature = "vision")]
+impl VisionStage for Vision {
+    fn decide(&self, atspi: usize, target: &Target, served: bool) -> (bool, &'static str) {
+        let d = woints_vision::decide_vision(
+            self.provider.config(),
+            atspi,
+            &target.class,
+            target.surface.is_layer(),
+            served,
+        );
+        (d.run, d.reason)
+    }
+    async fn collect(
+        &self,
+        target: &Target,
+        outputs: &[OutputGeom],
+    ) -> Result<Collected, ProviderError> {
+        self.provider
+            .collect_on(target, outputs, self.provider.budget())
+            .await
+    }
+    fn merge_params(&self) -> MergeParams {
+        self.merge
+    }
 }
 
 /// Inputs gathered by the `hypr.query` stage.
@@ -265,6 +354,8 @@ pub fn build_scene(
                 output: out.id.clone(),
                 matched: 0,
                 style: BadgeStyle::Normal,
+                vision: (elements[idx[k]].source == ElementSource::Vision)
+                    .then_some(elements[idx[k]].rect),
             });
         }
     }
@@ -336,13 +427,14 @@ pub fn filter_scene(
 /// Run select → collect → label → place on already queried Hyprland state.
 /// With `action`, only elements [`hintable`] for it are kept.
 /// `render`/`commit` are the caller's (they need the overlay or a renderer).
-pub async fn run<P: ElementProvider + Sync>(
+pub async fn run<P: ElementProvider + Sync, V: VisionStage>(
     hypr: HyprState,
     scope: Scope,
     action: Option<Action>,
     theme: &Theme,
     mut timings: Timings,
     provider: &P,
+    vision: &V,
 ) -> Result<Output, SelectError> {
     // select
     let t = Instant::now();
@@ -358,7 +450,7 @@ pub async fn run<P: ElementProvider + Sync>(
 
     // collect: the provider's own `collect.*` stages, or one `collect` stage.
     let t = Instant::now();
-    let mut elements = Vec::new();
+    let mut per_target: Vec<Vec<Element>> = Vec::with_capacity(targets.len());
     let mut reports = Vec::new();
     let mut sub = Timings::default();
     for target in &targets {
@@ -374,12 +466,13 @@ pub async fn run<P: ElementProvider + Sync>(
                 if c.report.truncated {
                     tracing::warn!(provider = provider.name(), "budget exceeded; truncated");
                 }
-                elements.extend(c.elements);
+                per_target.push(c.elements);
                 reports.push(c.report);
                 sub.0.extend(c.timings.0);
             }
             Err(e) => {
                 tracing::warn!(provider = provider.name(), "{e}");
+                per_target.push(Vec::new());
                 reports.push(CollectReport {
                     provider: provider.name().into(),
                     reasons: vec![e.to_string()],
@@ -388,16 +481,77 @@ pub async fn run<P: ElementProvider + Sync>(
             }
         }
     }
+    if sub.0.is_empty() {
+        stage(&mut timings, "collect", t, ());
+    } else {
+        timings.0.extend(sub.0);
+    }
+
+    // vision: policy per target, then capture → detect → merge (design D18).
+    let mut report = VisionReport::default();
+    let mut vision_timings = Timings::default();
+    let mut merge_ms = Duration::ZERO;
+    let mut elements = Vec::new();
+    for (target, atspi) in targets.iter().zip(per_target) {
+        let usable = match action {
+            Some(a) => atspi.iter().filter(|e| hintable(e, a)).count(),
+            None => atspi.len(),
+        };
+        let (run, reason) = vision.decide(usable, target, !atspi.is_empty());
+        tracing::debug!(class = %target.class, usable, run, reason, "vision decision");
+        if report.reason.is_empty() || run && !report.ran {
+            report = VisionReport {
+                ran: run,
+                reason: reason.into(),
+            };
+        }
+        if !run {
+            elements.extend(atspi);
+            continue;
+        }
+        let found = match vision
+            .collect(target, &hypr.outputs)
+            .instrument(tracing::debug_span!("vision"))
+            .await
+        {
+            Ok(c) => {
+                vision_timings.0.extend(c.timings.0);
+                reports.push(c.report);
+                c.elements
+            }
+            Err(e) => {
+                tracing::warn!("vision: {e}");
+                reports.push(CollectReport {
+                    provider: "vision".into(),
+                    reasons: vec![e.to_string()],
+                    ..Default::default()
+                });
+                Vec::new()
+            }
+        };
+        let t = Instant::now();
+        elements.extend(merge(atspi, found, &vision.merge_params()));
+        merge_ms += t.elapsed();
+    }
+    if report.ran {
+        for name in ["capture", "detect"] {
+            let ms: f64 = vision_timings
+                .0
+                .iter()
+                .filter(|s| s.stage == name)
+                .map(|s| s.ms)
+                .sum();
+            if vision_timings.get(name).is_some() {
+                timings.record(name, Duration::from_secs_f64(ms / 1000.0));
+            }
+        }
+        timings.record("merge", merge_ms);
+    }
     if let Some(a) = action {
         elements.retain(|e| hintable(e, a));
     }
     for (n, e) in elements.iter_mut().enumerate() {
         e.id = ElementId(n as u32 + 1);
-    }
-    if sub.0.is_empty() {
-        stage(&mut timings, "collect", t, ());
-    } else {
-        timings.0.extend(sub.0);
     }
 
     let (scene, labels) = build_scene(
@@ -416,6 +570,7 @@ pub async fn run<P: ElementProvider + Sync>(
         scene,
         timings,
         reports,
+        vision: report,
     })
 }
 
@@ -466,6 +621,7 @@ mod tests {
             &Theme::default(),
             Timings::default(),
             &DemoProvider,
+            &NoVision,
         )
         .await
         .unwrap()
@@ -509,6 +665,102 @@ mod tests {
         assert_eq!(stages, ["select", "collect", "label", "place"]);
     }
 
+    /// Vision stage running when fewer than `min` elements, finding one box
+    /// overlapping the first demo box and one new box.
+    struct FakeVision {
+        min: usize,
+    }
+
+    impl VisionStage for FakeVision {
+        fn decide(&self, atspi: usize, _: &Target, _: bool) -> (bool, &'static str) {
+            if atspi < self.min {
+                (true, "too_few_atspi")
+            } else {
+                (false, "enough_atspi")
+            }
+        }
+        async fn collect(&self, t: &Target, _: &[OutputGeom]) -> Result<Collected, ProviderError> {
+            let o = t.rect.origin();
+            let el = |x: i32, y: i32| Element {
+                id: ElementId(0),
+                rect: Rect::new(o.x + x, o.y + y, 64, 28),
+                role: "box".into(),
+                name: String::new(),
+                source: ElementSource::Vision,
+                actions: Action::POINTER.to_vec(),
+                caps: vec![],
+                confidence: 0.5,
+                handle: None,
+            };
+            let mut timings = Timings::default();
+            timings.record("capture", Duration::from_millis(1));
+            timings.record("detect", Duration::from_millis(2));
+            Ok(Collected {
+                elements: vec![el(DEMO_INSET + 1, DEMO_INSET), el(300, 200)],
+                report: CollectReport {
+                    provider: "vision".into(),
+                    ..Default::default()
+                },
+                timings,
+            })
+        }
+        fn merge_params(&self) -> MergeParams {
+            MergeParams::default()
+        }
+    }
+
+    async fn run_vision(min: usize) -> Output {
+        let h = HyprState {
+            outputs: outputs(),
+            focused_output: Some(OutputId("B".into())),
+            active: Some(window(-1500, 100)),
+        };
+        run(
+            h,
+            Scope::Focused,
+            Some(Action::Click),
+            &Theme::default(),
+            Timings::default(),
+            &DemoProvider,
+            &FakeVision { min },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn vision_runs_and_merges() {
+        let o = run_vision(10).await;
+        assert_eq!(
+            o.vision,
+            VisionReport {
+                ran: true,
+                reason: "too_few_atspi".into()
+            }
+        );
+        // Five demo boxes plus one new vision box; the overlapping one is dropped.
+        assert_eq!(o.elements.len(), 6);
+        assert_eq!(o.elements[5].source, ElementSource::Vision);
+        let stages: Vec<_> = o.timings.0.iter().map(|s| s.stage.as_str()).collect();
+        assert_eq!(
+            stages,
+            [
+                "select", "collect", "capture", "detect", "merge", "label", "place"
+            ]
+        );
+        let vb = o.scene.badges.iter().filter(|b| b.vision.is_some()).count();
+        assert_eq!(vb, 1);
+    }
+
+    #[tokio::test]
+    async fn vision_skipped_omits_stages() {
+        let o = run_vision(3).await;
+        assert!(!o.vision.ran);
+        assert_eq!(o.vision.reason, "enough_atspi");
+        assert_eq!(o.elements.len(), 5);
+        assert!(o.timings.get("capture").is_none() && o.timings.get("merge").is_none());
+    }
+
     #[tokio::test]
     async fn filter_scene_styles() {
         let o = run_on(window(-1500, 100)).await;
@@ -545,6 +797,7 @@ mod tests {
             &Theme::default(),
             Timings::default(),
             &DemoProvider,
+            &NoVision,
         )
         .await
         .unwrap();
@@ -565,7 +818,8 @@ mod tests {
                 None,
                 &Theme::default(),
                 Timings::default(),
-                &DemoProvider
+                &DemoProvider,
+                &NoVision
             )
             .await
             .unwrap_err(),

@@ -121,6 +121,19 @@ web-content pruning, 18 elements): `collect.connect` 0.01 ms (reused
 connection), `collect.match` 44 ms, `collect.extents` 14 ms,
 `collect.filter` 0.1 ms.
 
+Vision path, `WOINTS_VISION_MODE=always woints bench -n 20 --scope focused`,
+release build, 7840HS laptop, foot focused at 1438×858 on a 2880×1800 scale 2
+output (150 elements, capped by `vision.max_elements`):
+
+| stage   | p50 ms | p95 ms |
+|---------|-------:|-------:|
+| capture |  16.8  |  22.1  |
+| detect  |  26.2  |  28.1  |
+| merge   |   0.01 |   0.02 |
+| total   |  54.0  |  64.3  |
+
+Target total p95 < 300 ms. TODO(verify): the same run on the 5900X desktop.
+
 ## Debugging
 
 - `RUST_LOG=debug wointsd` logs every stage duration.

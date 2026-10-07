@@ -21,6 +21,8 @@ pub const SCROLL_STROKE: i32 = 2;
 pub const SCROLL_INSET: i32 = 1;
 /// Scroll rail width, logical px.
 pub const RAIL_W: i32 = 3;
+/// Corner radius of the dashed vision target outline, logical px.
+pub const VISION_OUTLINE_RADIUS: f32 = 2.0;
 /// Drag swatch side in the chip, logical px.
 pub const SWATCH: i32 = 8;
 
@@ -153,7 +155,24 @@ impl Renderer {
                 BadgeStyle::Faded => (tokens.bg, tokens.border, FADED_ALPHA),
                 BadgeStyle::Drag => (tokens.drag_bg, tokens.drag_bg, 1.0),
             };
-            self.draw_box(&mut pm, dev, radius, border, bg, bd, alpha);
+            let dash = vision_dash(hint, g.scale);
+            match (b.vision, b.style) {
+                (Some(target), BadgeStyle::Normal | BadgeStyle::Faded) => {
+                    let t = output_to_device(global_to_output(target, g), g.scale);
+                    stroke_dashed(
+                        &mut pm,
+                        t,
+                        VISION_OUTLINE_RADIUS * g.scale,
+                        border,
+                        tokens.vision,
+                        alpha,
+                        dash,
+                    );
+                    self.draw_box(&mut pm, dev, radius, 0, bg, bd, alpha);
+                    stroke_dashed(&mut pm, dev, radius, border, tokens.vision, alpha, dash);
+                }
+                _ => self.draw_box(&mut pm, dev, radius, border, bg, bd, alpha),
+            }
             let colors: Vec<Color> = (0..label.chars().count())
                 .map(|i| match (b.style, b.matched, hint.prefix_style) {
                     (BadgeStyle::Flash, _, _) => tokens.flash_fg,
@@ -193,6 +212,9 @@ impl Renderer {
                 Transform::identity(),
                 None,
             );
+        }
+        if border <= 0 {
+            return;
         }
         let half = border as f32 / 2.0;
         if let Some(path) = rounded_rect(
@@ -348,6 +370,45 @@ fn paint_a(c: Color, alpha: f32) -> Paint<'static> {
     p
 }
 
+/// `hint.vision_dash` in device px for `scale`.
+pub fn vision_dash(hint: &HintLayout, scale: f32) -> [f32; 2] {
+    hint.vision_dash.map(|d| (d * scale).max(1.0))
+}
+
+/// Dashed stroke of `width` device px inside `r`.
+fn stroke_dashed(
+    pm: &mut Pixmap,
+    r: Rect<Device>,
+    radius: f32,
+    width: i32,
+    c: Color,
+    alpha: f32,
+    dash: [f32; 2],
+) {
+    let half = width as f32 / 2.0;
+    let Some(path) = rounded_rect(
+        r.x as f32 + half,
+        r.y as f32 + half,
+        r.w as f32 - 2.0 * half,
+        r.h as f32 - 2.0 * half,
+        (radius - half).max(0.0),
+    ) else {
+        return;
+    };
+    let stroke = Stroke {
+        width: width as f32,
+        dash: tiny_skia::StrokeDash::new(dash.to_vec(), 0.0),
+        ..Stroke::default()
+    };
+    pm.stroke_path(
+        &path,
+        &paint_a(c, alpha),
+        &stroke,
+        Transform::identity(),
+        None,
+    );
+}
+
 fn fill_rect(pm: &mut Pixmap, r: Rect<Device>, c: Color) {
     fill_rect_a(pm, r, c, 1.0);
 }
@@ -499,6 +560,7 @@ mod tests {
                 output: OutputId("T".into()),
                 matched,
                 style,
+                vision: None,
             }],
             chip: None,
             pinned: None,
@@ -534,6 +596,7 @@ mod tests {
                 output: OutputId("T".into()),
                 matched: 0,
                 style: BadgeStyle::Normal,
+                vision: None,
             }],
             chip: None,
             pinned: None,
@@ -543,6 +606,65 @@ mod tests {
         let pm = Renderer::new().render(&scene, &output(scale));
         let (_, _, w, h) = bbox(&pm);
         (w, h)
+    }
+
+    /// Vision badge at `scale`: (vision-coloured pixels, border-coloured pixels).
+    fn vision_render(scale: f32) -> (usize, usize) {
+        let theme = Theme::default();
+        let t = theme.tokens.clone();
+        let s = badge_size(2, &theme.hint);
+        let badge = |label: &str, x: i32, vision| Badge {
+            label: label.into(),
+            rect: Rect::<Global>::new(x, 10, s.w * 2, s.h * 2),
+            output: OutputId("T".into()),
+            matched: 0,
+            style: BadgeStyle::Normal,
+            vision,
+        };
+        let scene = Scene {
+            outputs: vec![],
+            badges: vec![
+                badge("as", 10, None),
+                badge("df", 120, Some(Rect::<Global>::new(110, 5, 80, 60))),
+            ],
+            chip: None,
+            pinned: None,
+            scroll: None,
+            theme,
+        };
+        let pm = Renderer::new().render(&scene, &output(scale));
+        let count = |c: Color, x0: u32, x1: u32| {
+            let mut n = 0;
+            for y in 0..pm.height() {
+                for x in x0..x1.min(pm.width()) {
+                    let p = pm.pixel(x, y).unwrap().demultiply();
+                    if (p.red(), p.green(), p.blue(), p.alpha()) == (c.r, c.g, c.b, 255) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let split = (100.0 * scale) as u32;
+        let vision = count(t.vision, split, u32::MAX);
+        let solid = count(t.border, 0, split);
+        assert_eq!(count(t.vision, 0, split), 0, "AT-SPI badge stays solid");
+        assert_eq!(
+            count(t.border, split, u32::MAX),
+            0,
+            "vision badge has no solid border"
+        );
+        (vision, solid)
+    }
+
+    #[test]
+    fn vision_badges_dashed() {
+        let (v1, b1) = vision_render(1.0);
+        let (v2, b2) = vision_render(2.0);
+        assert!(v1 > 0 && b1 > 0);
+        assert!(v2 > v1 && b2 > b1);
+        assert_eq!(vision_dash(&Theme::default().hint, 2.0), [4.0, 4.0]);
+        assert_eq!(vision_dash(&Theme::default().hint, 1.0), [2.0, 2.0]);
     }
 
     #[test]
@@ -580,6 +702,7 @@ mod tests {
                 output: OutputId("T".into()),
                 matched: 0,
                 style: BadgeStyle::Normal,
+                vision: None,
             }],
             chip: None,
             pinned: None,
@@ -640,6 +763,7 @@ mod tests {
             output: OutputId("T".into()),
             matched: 0,
             style,
+            vision: None,
         };
         let source = Rect::new(100, 100, 50, 40);
         let scene = Scene {
@@ -694,6 +818,7 @@ mod tests {
                 output: OutputId("T".into()),
                 matched: 0,
                 style: BadgeStyle::Normal,
+                vision: None,
             }],
             chip: None,
             pinned: None,
