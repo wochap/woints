@@ -1,6 +1,9 @@
 //! Layer-shell overlay thread (design D5): one OVERLAY surface per output,
 //! fractional scale via `wp_fractional_scale_v1` + `wp_viewporter`.
 
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::Arc;
 use std::time::Instant;
 
 use smithay_client_toolkit::{
@@ -32,17 +35,33 @@ use smithay_client_toolkit::{
 };
 use tokio::sync::{mpsc, oneshot};
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle, event_created_child,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_callback, wl_display, wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
+    protocol::{
+        wl_callback, wl_display, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface,
+    },
+};
+use wayland_protocols::ext::data_control::v1::client::{
+    ext_data_control_device_v1 as ext_device, ext_data_control_manager_v1 as ext_manager,
+    ext_data_control_offer_v1 as ext_offer, ext_data_control_source_v1 as ext_source,
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
     viewporter::client::{wp_viewport, wp_viewporter},
 };
+use wayland_protocols_wlr::data_control::v1::client::{
+    zwlr_data_control_device_v1 as wlr_device, zwlr_data_control_manager_v1 as wlr_manager,
+    zwlr_data_control_offer_v1 as wlr_offer, zwlr_data_control_source_v1 as wlr_source,
+};
+use wayland_protocols_wlr::virtual_pointer::v1::client::{
+    zwlr_virtual_pointer_manager_v1 as vp_manager, zwlr_virtual_pointer_v1 as vp,
+};
 
+use woints_core::act::{Axis, ButtonState};
 use woints_core::geom::{OutputGeom, OutputId, Point, Size};
-use woints_core::ports::{CommitTimings, KeyPress, Modifiers, OverlayError, OverlayEvent, Scene};
+use woints_core::ports::{
+    CommitTimings, KeyPress, Modifiers, OverlayCaps, OverlayError, OverlayEvent, Scene,
+};
 
 use crate::render::{OutputSurface, Renderer, dump_if_requested, to_argb8888};
 
@@ -54,11 +73,60 @@ pub(crate) enum Command {
     Hide,
     /// Hide, then reply once the compositor has processed the unmap.
     HideAck(oneshot::Sender<()>),
+    /// One virtual pointer operation; replies once sent (`Roundtrip`: once
+    /// the compositor processed everything before it).
+    Pointer(PointerOp, oneshot::Sender<Result<(), String>>),
+    /// Set the clipboard selection to `text/plain;charset=utf-8` text.
+    Clipboard(String, oneshot::Sender<Result<(), String>>),
     Shutdown,
 }
 
-/// Reply slot carried by the `wl_display.sync` callback of a `HideAck`.
-pub(crate) struct HideAck(std::sync::Mutex<Option<oneshot::Sender<()>>>);
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PointerOp {
+    Button(u32, ButtonState),
+    Motion(f64, f64),
+    Axis(Axis, f64, i32),
+    Absolute {
+        output: OutputId,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    },
+    Roundtrip,
+}
+
+/// Reply run by a `wl_display.sync` callback.
+type Reply = Box<dyn FnOnce() + Send>;
+pub(crate) struct SyncAck(std::sync::Mutex<Option<Reply>>);
+
+pub(crate) const MIME_TEXT: &str = "text/plain;charset=utf-8";
+
+/// The data control protocol in use (design D19).
+enum DataControl {
+    Wlr(wlr_manager::ZwlrDataControlManagerV1),
+    Ext(ext_manager::ExtDataControlManagerV1),
+}
+
+enum ClipDevice {
+    Wlr(wlr_device::ZwlrDataControlDeviceV1),
+    Ext(ext_device::ExtDataControlDeviceV1),
+}
+
+/// The selection source we own, kept until the compositor cancels it.
+enum ClipSource {
+    Wlr(wlr_source::ZwlrDataControlSourceV1),
+    Ext(ext_source::ExtDataControlSourceV1),
+}
+
+impl ClipSource {
+    fn destroy(&self) {
+        match self {
+            ClipSource::Wlr(s) => s.destroy(),
+            ClipSource::Ext(s) => s.destroy(),
+        }
+    }
+}
 
 struct OutSurface {
     output_id: OutputId,
@@ -90,6 +158,16 @@ pub(crate) struct State {
     viewporter: Option<wp_viewporter::WpViewporter>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     mods: Modifiers,
+    pointer_manager: Option<vp_manager::ZwlrVirtualPointerManagerV1>,
+    /// Long-lived seat pointer (design D14).
+    pointer: Option<vp::ZwlrVirtualPointerV1>,
+    /// Output-bound pointers for the `absolute` backend.
+    output_pointers: HashMap<OutputId, vp::ZwlrVirtualPointerV1>,
+    data_control: Option<DataControl>,
+    clip_device: Option<ClipDevice>,
+    clip_source: Option<ClipSource>,
+    clip_text: Arc<String>,
+    started: Instant,
 
     renderer: Renderer,
     scene: Option<Scene>,
@@ -107,7 +185,7 @@ pub(crate) struct State {
 pub(crate) fn run(
     commands: Channel<Command>,
     events: mpsc::UnboundedSender<OverlayEvent>,
-    ready: std::sync::mpsc::Sender<Result<(), String>>,
+    ready: std::sync::mpsc::Sender<Result<OverlayCaps, String>>,
 ) -> Result<(), String> {
     let setup = || -> Result<(EventLoop<'static, State>, State), String> {
         let conn = Connection::connect_to_env().map_err(|e| format!("wayland connect: {e}"))?;
@@ -136,7 +214,7 @@ pub(crate) fn run(
     };
     let (mut event_loop, mut state) = match setup() {
         Ok(v) => {
-            let _ = ready.send(Ok(()));
+            let _ = ready.send(Ok(v.1.caps()));
             v
         }
         Err(e) => {
@@ -172,6 +250,29 @@ impl State {
                 "fractional scale or viewporter missing; falling back to integer wl_output.scale"
             );
         }
+        let pointer_manager: Option<vp_manager::ZwlrVirtualPointerManagerV1> =
+            globals.bind(qh, 1..=2, ()).ok();
+        let pointer = pointer_manager
+            .as_ref()
+            .map(|m| m.create_virtual_pointer(None, qh, ()));
+        if pointer.is_none() {
+            tracing::warn!(
+                "zwlr_virtual_pointer_manager_v1 not advertised; pointer actions disabled"
+            );
+        }
+        let data_control = globals
+            .bind::<wlr_manager::ZwlrDataControlManagerV1, _, _>(qh, 1..=2, ())
+            .ok()
+            .map(DataControl::Wlr)
+            .or_else(|| {
+                globals
+                    .bind::<ext_manager::ExtDataControlManagerV1, _, _>(qh, 1..=1, ())
+                    .ok()
+                    .map(DataControl::Ext)
+            });
+        if data_control.is_none() {
+            tracing::info!("no data control protocol advertised; copy disabled");
+        }
         Ok(Self {
             registry: RegistryState::new(globals),
             outputs: OutputState::new(globals, qh),
@@ -184,6 +285,14 @@ impl State {
             viewporter,
             keyboard: None,
             mods: Modifiers::default(),
+            pointer_manager,
+            pointer,
+            output_pointers: HashMap::new(),
+            data_control,
+            clip_device: None,
+            clip_source: None,
+            clip_text: Arc::new(String::new()),
+            started: Instant::now(),
             renderer: Renderer::new(),
             scene: None,
             surfaces: Vec::new(),
@@ -196,6 +305,24 @@ impl State {
         })
     }
 
+    fn caps(&self) -> OverlayCaps {
+        OverlayCaps {
+            pointer: self.pointer.is_some(),
+            clipboard: self.data_control.as_ref().map(|d| match d {
+                DataControl::Wlr(_) => "zwlr_data_control_v1",
+                DataControl::Ext(_) => "ext_data_control_v1",
+            }),
+        }
+    }
+
+    /// Run `reply` once the compositor has processed every request sent so far.
+    fn sync(&self, reply: impl FnOnce() + Send + 'static) {
+        self.display.sync(
+            &self.qh,
+            SyncAck(std::sync::Mutex::new(Some(Box::new(reply)))),
+        );
+    }
+
     fn handle(&mut self, cmd: Command) {
         match cmd {
             Command::Show { scene, reply } => self.show(*scene, reply),
@@ -204,13 +331,132 @@ impl State {
                 self.hide();
                 // The sync reply arrives after the compositor handled the
                 // destroy requests sent before it.
-                self.display
-                    .sync(&self.qh, HideAck(std::sync::Mutex::new(Some(reply))));
+                self.sync(move || {
+                    let _ = reply.send(());
+                });
+            }
+            Command::Pointer(op, reply) => self.pointer_op(op, reply),
+            Command::Clipboard(text, reply) => {
+                let _ = reply.send(self.set_clipboard(text));
             }
             Command::Shutdown => {
                 self.hide();
                 self.signal.stop();
             }
+        }
+    }
+
+    fn time_ms(&self) -> u32 {
+        self.started.elapsed().as_millis() as u32
+    }
+
+    fn pointer_op(&mut self, op: PointerOp, reply: oneshot::Sender<Result<(), String>>) {
+        let Some(p) = self.pointer.clone() else {
+            let _ = reply.send(Err("virtual pointer unavailable".into()));
+            return;
+        };
+        let t = self.time_ms();
+        match op {
+            PointerOp::Roundtrip => {
+                self.sync(move || {
+                    let _ = reply.send(Ok(()));
+                });
+                return;
+            }
+            PointerOp::Button(code, state) => {
+                let state = match state {
+                    ButtonState::Pressed => wl_pointer::ButtonState::Pressed,
+                    ButtonState::Released => wl_pointer::ButtonState::Released,
+                };
+                p.button(t, code, state);
+                p.frame();
+            }
+            PointerOp::Motion(dx, dy) => {
+                p.motion(t, dx, dy);
+                p.frame();
+            }
+            PointerOp::Axis(axis, px, lines) => {
+                let axis = match axis {
+                    Axis::Vertical => wl_pointer::Axis::VerticalScroll,
+                    Axis::Horizontal => wl_pointer::Axis::HorizontalScroll,
+                };
+                p.axis_source(wl_pointer::AxisSource::Wheel);
+                p.axis(t, axis, px);
+                p.axis_discrete(t, axis, px, lines);
+                p.frame();
+            }
+            PointerOp::Absolute { output, x, y, w, h } => {
+                let Some(op) = self.output_pointer(&output) else {
+                    let _ = reply.send(Err(format!("no virtual pointer for output {output}")));
+                    return;
+                };
+                op.motion_absolute(t, x, y, w, h);
+                op.frame();
+            }
+        }
+        let _ = reply.send(Ok(()));
+    }
+
+    /// Pointer bound to `output` (manager v2), created on first use.
+    fn output_pointer(&mut self, output: &OutputId) -> Option<vp::ZwlrVirtualPointerV1> {
+        if let Some(p) = self.output_pointers.get(output) {
+            return Some(p.clone());
+        }
+        let m = self.pointer_manager.as_ref().filter(|m| m.version() >= 2)?;
+        let wl_output = self.find_output(output)?;
+        let p = m.create_virtual_pointer_with_output(None, Some(&wl_output), &self.qh, ());
+        self.output_pointers.insert(output.clone(), p.clone());
+        Some(p)
+    }
+
+    fn set_clipboard(&mut self, text: String) -> Result<(), String> {
+        let Some(dc) = &self.data_control else {
+            return Err("clipboard unavailable: zwlr_data_control_v1 not advertised".into());
+        };
+        let qh = &self.qh;
+        if self.clip_device.is_none() {
+            let seat = self
+                .seats
+                .seats()
+                .next()
+                .ok_or("clipboard unavailable: no seat")?;
+            self.clip_device = Some(match dc {
+                DataControl::Wlr(m) => ClipDevice::Wlr(m.get_data_device(&seat, qh, ())),
+                DataControl::Ext(m) => ClipDevice::Ext(m.get_data_device(&seat, qh, ())),
+            });
+        }
+        self.clip_text = Arc::new(text);
+        let source = match dc {
+            DataControl::Wlr(m) => {
+                let s = m.create_data_source(qh, ());
+                s.offer(MIME_TEXT.into());
+                ClipSource::Wlr(s)
+            }
+            DataControl::Ext(m) => {
+                let s = m.create_data_source(qh, ());
+                s.offer(MIME_TEXT.into());
+                ClipSource::Ext(s)
+            }
+        };
+        match (self.clip_device.as_ref(), &source) {
+            (Some(ClipDevice::Wlr(d)), ClipSource::Wlr(s)) => d.set_selection(Some(s)),
+            (Some(ClipDevice::Ext(d)), ClipSource::Ext(s)) => d.set_selection(Some(s)),
+            _ => return Err("clipboard device mismatch".into()),
+        }
+        if let Some(old) = self.clip_source.replace(source) {
+            old.destroy();
+        }
+        Ok(())
+    }
+
+    /// Serve a paste request from our source.
+    fn send_clip(&self, fd: std::os::fd::OwnedFd, mime: &str) {
+        if mime != MIME_TEXT && mime != "text/plain" && mime != "UTF8_STRING" {
+            return;
+        }
+        let mut f = std::fs::File::from(fd);
+        if let Err(e) = f.write_all(self.clip_text.as_bytes()) {
+            tracing::warn!("clipboard send: {e}");
         }
     }
 
@@ -600,6 +846,9 @@ impl KeyboardHandler for State {
             let _ = self.events.send(OverlayEvent::Escaped);
             return;
         }
+        if is_modifier(ev.keysym.raw()) {
+            return;
+        }
         let _ = self.events.send(OverlayEvent::Key(KeyPress {
             // sctk reports the evdev code; xkb keycodes are offset by 8.
             keycode: ev.raw_code + 8,
@@ -717,19 +966,144 @@ impl Dispatch<wp_viewport::WpViewport, ()> for State {
     }
 }
 
-impl Dispatch<wl_callback::WlCallback, HideAck> for State {
+/// Shift, Control, Caps/Shift Lock, Meta, Alt, Super, Hyper, ISO level
+/// shifts: never part of the typed buffer.
+pub(crate) fn is_modifier(keysym: u32) -> bool {
+    (0xffe1..=0xffee).contains(&keysym) || (0xfe01..=0xfe13).contains(&keysym)
+}
+
+impl Dispatch<wl_callback::WlCallback, SyncAck> for State {
     fn event(
         _: &mut Self,
         _: &wl_callback::WlCallback,
         event: wl_callback::Event,
-        ack: &HideAck,
+        ack: &SyncAck,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         if let wl_callback::Event::Done { .. } = event {
-            if let Some(tx) = ack.0.lock().ok().and_then(|mut g| g.take()) {
-                let _ = tx.send(());
+            if let Some(f) = ack.0.lock().ok().and_then(|mut g| g.take()) {
+                f();
             }
+        }
+    }
+}
+
+macro_rules! no_events {
+    ($($t:ty),* $(,)?) => {$(
+        impl Dispatch<$t, ()> for State {
+            fn event(
+                _: &mut Self,
+                _: &$t,
+                _: <$t as Proxy>::Event,
+                _: &(),
+                _: &Connection,
+                _: &QueueHandle<Self>,
+            ) {
+            }
+        }
+    )*};
+}
+
+no_events!(
+    vp_manager::ZwlrVirtualPointerManagerV1,
+    vp::ZwlrVirtualPointerV1,
+    wlr_manager::ZwlrDataControlManagerV1,
+    ext_manager::ExtDataControlManagerV1,
+    wlr_offer::ZwlrDataControlOfferV1,
+    ext_offer::ExtDataControlOfferV1,
+);
+
+impl Dispatch<wlr_device::ZwlrDataControlDeviceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wlr_device::ZwlrDataControlDeviceV1,
+        event: wlr_device::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wlr_device::Event::DataOffer { id } => id.destroy(),
+            wlr_device::Event::Finished => {
+                if let Some(ClipDevice::Wlr(d)) = state.clip_device.take() {
+                    d.destroy();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(State, wlr_device::ZwlrDataControlDeviceV1, [
+        wlr_device::EVT_DATA_OFFER_OPCODE => (wlr_offer::ZwlrDataControlOfferV1, ()),
+    ]);
+}
+
+impl Dispatch<ext_device::ExtDataControlDeviceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ext_device::ExtDataControlDeviceV1,
+        event: ext_device::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_device::Event::DataOffer { id } => id.destroy(),
+            ext_device::Event::Finished => {
+                if let Some(ClipDevice::Ext(d)) = state.clip_device.take() {
+                    d.destroy();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(State, ext_device::ExtDataControlDeviceV1, [
+        ext_device::EVT_DATA_OFFER_OPCODE => (ext_offer::ExtDataControlOfferV1, ()),
+    ]);
+}
+
+impl Dispatch<wlr_source::ZwlrDataControlSourceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        source: &wlr_source::ZwlrDataControlSourceV1,
+        event: wlr_source::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wlr_source::Event::Send { mime_type, fd } => state.send_clip(fd, &mime_type),
+            wlr_source::Event::Cancelled => {
+                if matches!(&state.clip_source, Some(ClipSource::Wlr(s)) if s == source) {
+                    state.clip_source = None;
+                }
+                source.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_source::ExtDataControlSourceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        source: &ext_source::ExtDataControlSourceV1,
+        event: ext_source::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_source::Event::Send { mime_type, fd } => state.send_clip(fd, &mime_type),
+            ext_source::Event::Cancelled => {
+                if matches!(&state.clip_source, Some(ClipSource::Ext(s)) if s == source) {
+                    state.clip_source = None;
+                }
+                source.destroy();
+            }
+            _ => {}
         }
     }
 }
@@ -741,3 +1115,20 @@ delegate_seat!(State);
 delegate_keyboard!(State);
 delegate_layer!(State);
 delegate_registry!(State);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modifier_keysyms() {
+        // Shift_L, Control_R, Alt_L, Super_L, ISO_Level3_Shift.
+        for k in [0xffe1, 0xffe4, 0xffe9, 0xffeb, 0xfe03] {
+            assert!(is_modifier(k), "{k:#x}");
+        }
+        // a, D, Tab, Left.
+        for k in [0x61, 0x44, 0xff09, 0xff51] {
+            assert!(!is_modifier(k), "{k:#x}");
+        }
+    }
+}

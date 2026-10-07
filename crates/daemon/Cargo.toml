@@ -14,6 +14,7 @@ woints-core.workspace = true
 woints-hypr.workspace = true
 woints-overlay.workspace = true
 woints-a11y.workspace = true
+woints-input.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

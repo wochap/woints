@@ -1931,6 +1931,7 @@ dependencies = [
  "woints-a11y",
  "woints-core",
  "woints-hypr",
+ "woints-input",
  "woints-overlay",
 ]
 
@@ -1950,7 +1951,13 @@ dependencies = [
 name = "woints-input"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+ "tokio",
+ "tracing",
+ "woints-a11y",
  "woints-core",
+ "woints-hypr",
+ "woints-overlay",
 ]
 
 [[package]]
@@ -1965,6 +1972,7 @@ dependencies = [
  "tracing",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "woints-core",
  "woints-hypr",
 ]

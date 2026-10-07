@@ -167,6 +167,16 @@ pub struct Version {
     pub commit: String,
 }
 
+pub fn parse_cursor_pos(s: &str) -> std::result::Result<Point<Global>, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct Pos {
+        x: f64,
+        y: f64,
+    }
+    let p: Pos = serde_json::from_str(s)?;
+    Ok(Point::new(p.x.round() as i32, p.y.round() as i32))
+}
+
 pub fn parse_monitors(s: &str) -> std::result::Result<Vec<Monitor>, serde_json::Error> {
     serde_json::from_str(s)
 }
@@ -254,6 +264,15 @@ impl Hypr {
 
     pub async fn version(&self) -> Result<Version> {
         self.json("version").await
+    }
+
+    /// `cursorpos`, in global logical coordinates.
+    pub async fn cursor_pos(&self) -> Result<Point<Global>> {
+        let s = self.request("j/cursorpos").await?;
+        parse_cursor_pos(&s).map_err(|source| Error::Parse {
+            cmd: "cursorpos".into(),
+            source,
+        })
     }
 
     /// `dispatch <cmd>`; any reply other than `ok` is an error.
@@ -406,6 +425,14 @@ mod tests {
     const LAYERS: &str = include_str!("../tests/fixtures/layers.json");
     const CLIENTS: &str = include_str!("../tests/fixtures/clients.json");
     const VERSION: &str = include_str!("../tests/fixtures/version.json");
+
+    #[test]
+    fn cursor_pos() {
+        assert_eq!(
+            parse_cursor_pos(r#"{"x": -1780, "y": 120.4}"#).unwrap(),
+            Point::new(-1780, 120)
+        );
+    }
 
     #[test]
     fn monitors_fixture() {

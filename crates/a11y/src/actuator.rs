@@ -1,9 +1,9 @@
-//! `AtspiActuator`: `DoAction` or `GrabFocus` (design D21).
+//! `AtspiActuator`: `DoAction`, `GrabFocus`, text and scrollbar reads (design D16, D21).
 
 use std::sync::Arc;
 
-use woints_core::model::{ActionKind, Element};
-use woints_core::ports::{ActError, Actuator};
+use woints_core::model::{Action, AtspiCap, Element};
+use woints_core::ports::{ActError, Actuator, ScrollValue};
 use woints_core::profile::ToolkitProfile;
 
 use crate::conn::A11yConnection;
@@ -23,12 +23,14 @@ pub enum Plan {
     NeedsPointer,
 }
 
-pub fn plan(element: &[ActionKind], action: ActionKind) -> Plan {
+/// `GrabFocus` for `focus` and for `click` on text entries, `DoAction` for
+/// `click` on elements with actions.
+pub fn plan(caps: &[AtspiCap], action: Action) -> Plan {
     match action {
-        ActionKind::Focus => Plan::GrabFocus,
-        ActionKind::Activate => match element.first() {
-            Some(ActionKind::Focus) => Plan::GrabFocus,
-            Some(ActionKind::Activate) => Plan::DoAction,
+        Action::Focus if !caps.is_empty() => Plan::GrabFocus,
+        Action::Click => match caps.first() {
+            Some(AtspiCap::GrabFocus) => Plan::GrabFocus,
+            _ if caps.contains(&AtspiCap::DoAction) => Plan::DoAction,
             _ => Plan::NeedsPointer,
         },
         _ => Plan::NeedsPointer,
@@ -53,24 +55,59 @@ impl AtspiActuator {
         let apps = self.apps.lock().unwrap_or_else(|e| e.into_inner());
         apps.profile_for(bus).unwrap_or_default().action_preference
     }
-}
 
-impl Actuator for AtspiActuator {
-    async fn act(&self, element: &Element, action: ActionKind) -> Result<(), ActError> {
-        let p = plan(&element.actions, action);
-        if p == Plan::NeedsPointer {
-            return Err(ActError::NeedsPointer(action));
-        }
+    async fn obj(&self, element: &Element) -> Result<(zbus::Connection, Obj), ActError> {
         let obj = element
             .handle
             .as_deref()
             .and_then(Obj::from_handle)
-            .ok_or(ActError::NeedsPointer(action))?;
+            .ok_or_else(|| ActError::Failed("element has no AT-SPI handle".into()))?;
         let (c, _) = self
             .conn
             .get()
             .await
             .map_err(|e| ActError::Failed(e.to_string()))?;
+        Ok((c, obj))
+    }
+
+    /// `Text.GetText(0, -1)`, falling back to `Accessible.Name`.
+    pub async fn text(&self, element: &Element) -> Result<String, ActError> {
+        let (c, obj) = self.obj(element).await?;
+        match dbus::text(&c, &obj).await {
+            Ok(t) if !t.is_empty() => Ok(t),
+            _ => dbus::name(&c, &obj)
+                .await
+                .map_err(|e| ActError::Failed(e.to_string())),
+        }
+    }
+
+    /// `Value` of the container's scrollbar child, vertical first.
+    pub async fn scroll_value(&self, element: &Element) -> Option<ScrollValue> {
+        let (c, obj) = self.obj(element).await.ok()?;
+        let mut bars = Vec::new();
+        for ch in dbus::children(&c, &obj).await.ok()? {
+            if dbus::role_name(&c, &ch).await.ok()?.as_str() != "scroll bar" {
+                continue;
+            }
+            let (_, _, w, h) = dbus::extents(&c, &ch).await.ok()?;
+            bars.push((h >= w, ch));
+        }
+        bars.sort_by_key(|(vertical, _)| !vertical);
+        let (_, bar) = bars.into_iter().next()?;
+        let (current, min, max) = dbus::value(&c, &bar).await.ok()?;
+        Some(ScrollValue { current, min, max })
+    }
+}
+
+impl Actuator for AtspiActuator {
+    /// `GrabFocus` returning `false` yields [`ActError::NeedsPointer`] so the
+    /// caller falls back to a pointer click.
+    async fn act(&self, element: &Element, action: Action) -> Result<(), ActError> {
+        let p = plan(&element.caps, action);
+        if p == Plan::NeedsPointer || element.handle.is_none() {
+            return Err(ActError::NeedsPointer(action));
+        }
+        let (c, obj) = self.obj(element).await?;
         let ok = match p {
             Plan::GrabFocus => dbus::grab_focus(&c, &obj).await,
             Plan::DoAction => {
@@ -82,10 +119,10 @@ impl Actuator for AtspiActuator {
             Plan::NeedsPointer => unreachable!(),
         }
         .map_err(|e| ActError::Failed(e.to_string()))?;
-        if ok {
-            Ok(())
-        } else {
-            Err(ActError::Failed(format!("{p:?} returned false")))
+        match (ok, p) {
+            (true, _) => Ok(()),
+            (false, Plan::GrabFocus) => Err(ActError::NeedsPointer(action)),
+            (false, _) => Err(ActError::Failed(format!("{p:?} returned false"))),
         }
     }
 }
@@ -127,11 +164,12 @@ mod tests {
 
     #[test]
     fn plans() {
-        use ActionKind::*;
-        assert_eq!(plan(&[Activate], Activate), Plan::DoAction);
-        assert_eq!(plan(&[Focus, Activate], Activate), Plan::GrabFocus);
-        assert_eq!(plan(&[Activate], Focus), Plan::GrabFocus);
-        assert_eq!(plan(&[Pointer], Activate), Plan::NeedsPointer);
-        assert_eq!(plan(&[Activate], Right), Plan::NeedsPointer);
+        use AtspiCap::*;
+        assert_eq!(plan(&[DoAction], Action::Click), Plan::DoAction);
+        assert_eq!(plan(&[GrabFocus, DoAction], Action::Click), Plan::GrabFocus);
+        assert_eq!(plan(&[DoAction], Action::Focus), Plan::GrabFocus);
+        assert_eq!(plan(&[Accessible], Action::Click), Plan::NeedsPointer);
+        assert_eq!(plan(&[], Action::Focus), Plan::NeedsPointer);
+        assert_eq!(plan(&[DoAction], Action::Right), Plan::NeedsPointer);
     }
 }

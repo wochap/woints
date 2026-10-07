@@ -3,19 +3,21 @@
 Vimium-style keyboard hints for Hyprland. Press a key binding and letter
 hints appear over interactive elements; type a hint to act on it.
 
-Milestone 2 (this tree) finds real elements through AT-SPI and acts on them:
-`woints hints` badges the interactive elements of the focused GTK3, GTK4 or
-Qt Widgets window; typing filters the badges, Backspace undoes, a full label
-flashes and activates the element (`DoAction`) or focuses it (`GrabFocus`
-for text entries). Pointer actions (M3), vision fallback (M4) and quickshell
-(M4–M5) come later. Toolkit findings are in [`docs/toolkits.md`](docs/toolkits.md).
+Milestone 3 (this tree) finds real elements through AT-SPI and acts on them
+through AT-SPI or a real pointer: `woints hints` badges the interactive
+elements of the focused GTK3, GTK4 or Qt Widgets window; typing filters the
+badges, Backspace undoes, a full label flashes and performs the session's
+action (click by default). Vision fallback (M4) and quickshell (M4–M5) come
+later. Toolkit findings are in [`docs/toolkits.md`](docs/toolkits.md).
 
 ## Architecture
 
 ```
                      ┌──────────────── wointsd ────────────────┐
   woints CLI ──────► │ Session FSM: Idle ─hints─► Showing      │
-  JSON lines         │            ▲  cancel / Esc / quit ◄──┘  │
+  JSON lines         │   Showing ─drag─► ShowingSecond ─► Idle │
+                     │   Showing ─scroll─► Scrolling ─Esc─► Idle│
+                     │            ▲  cancel / Esc / quit ◄──┘  │
   $XDG_RUNTIME_DIR/  └──┬──────────┬───────────┬──────────┬────┘
   woints.sock    TargetSelector  ElementProvider  Overlay  Actuator   (ports, crates/core)
                       │              │              │         │
@@ -31,7 +33,8 @@ for text entries). Pointer actions (M3), vision fallback (M4) and quickshell
 | `woints-daemon` | `wointsd` | tokio daemon: socket server, session FSM, pipeline, stage timing |
 | `woints-cli` | `woints` | thin client |
 | `woints-a11y` | | AT-SPI provider and actuator: one zbus connection to the a11y bus, pid/fuzzy pairing, `Collection.GetMatches` or a bounded pipelined walk per toolkit profile, `WINDOW` extents, phantom filters |
-| `woints-vision`, `woints-input` | | placeholders for M3–M4 |
+| `woints-input` | | pointer actuator: Hyprland `movecursor` + `zwlr_virtual_pointer_v1` buttons, motion and axis events (or output-local `motion_absolute`) |
+| `woints-vision` | | placeholder for M4 |
 
 Pipeline stages (each timed, logged at `debug` as `stage=<name> ms=<f32>`):
 `hypr.query → select → collect.connect → collect.match → collect.extents →
@@ -51,6 +54,9 @@ just build | test | lint | run-daemon | dump
 ```ini
 exec-once = wointsd
 bind = SUPER, F, exec, woints hints
+bind = SUPER SHIFT, F, exec, woints hints --action right
+bind = SUPER, D, exec, woints hints --action drag
+bind = SUPER, S, exec, woints hints --action scroll
 ```
 
 Verified against Hyprland **0.56.2**.
@@ -58,17 +64,53 @@ Verified against Hyprland **0.56.2**.
 ## CLI
 
 ```
-woints hints [--scope focused] [--action activate|focus]
+woints hints [--scope focused] [--action <action>]
 woints cancel | status | quit
 woints snapshot [--scope focused] [--json]
-woints act --snapshot N --id E [--action activate|focus|left|right|middle|double|hover]
+woints act --snapshot N --id E [--action <action>] [--to E2] [--axis v|h --amount N]
 woints bench [-n 20]
 ```
 
 Exit codes: `0` ok, `1` daemon replied `ok:false`, `2` daemon not reachable.
 
-Only `activate` and `focus` succeed in M2; other actions reply
-`no actuator for <action>` until the pointer actuator lands (M3).
+## Actions
+
+| action | what happens | actuator |
+|---|---|---|
+| `click` (default) | left click at the element centre | AT-SPI `DoAction` (`GrabFocus` on entries) when available, else pointer |
+| `right` | right click (button 273) | pointer |
+| `middle` | middle click (button 274) | pointer |
+| `double` | two left clicks, `input.double_click_gap_ms` (40) apart | pointer |
+| `hover` | move the cursor only, never restored | pointer |
+| `focus` | `GrabFocus`; a pointer click when it returns `false` | AT-SPI, pointer fallback |
+| `drag` | pick a source (`drag 1/2`), then a destination (`drag 2/2`, fresh labels, source pinned); press, `input.drag_steps` (8) relative motions, `movecursor` to the destination, release. Esc in phase 2 returns to phase 1 | pointer |
+| `scroll` | pick a scroll container (skipped when there is one); `h j k l` / arrows scroll `input.scroll_step` (3) lines of 15 px; Tab re-picks, Esc exits | pointer axis events |
+| `copy` | element text (`Text.GetText`, else its name) to the clipboard as `text/plain;charset=utf-8` | AT-SPI + data control |
+
+Modifiers held on the **final** glyph pick the action: Shift → `right`,
+Ctrl → `middle`, Alt → `hover` (`[modifiers] shift/ctrl/alt/super`, each an
+action or `"none"`). An explicit `--action` wins over modifiers. Glyphs match
+by keycode, so `Shift+d` still matches `d`.
+
+Pointer actions move the cursor with Hyprland `dispatch movecursor x y`
+(global logical coordinates) and send buttons, relative motion and axis
+events through one long-lived `zwlr_virtual_pointer_v1` on the overlay's
+Wayland connection, each followed by `frame` and a roundtrip. They run only
+after the overlay's unmap has been confirmed. Absolute virtual-pointer motion
+is not used by default (hyprwm/Hyprland#6749); `input.pointer = "absolute"`
+selects output-local `motion_absolute` instead. `input.restore_cursor = true`
+moves the cursor back afterwards (`hover` excepted). `input.prefer =
+"pointer"` skips AT-SPI for `click`/`focus`. ydotool, uinput and the
+RemoteDesktop portal are deliberately not used: they need root-adjacent
+setup or do not exist on Hyprland.
+
+`copy` needs `zwlr_data_control_manager_v1` (or `ext_data_control_manager_v1`);
+without it, `copy` fails with `clipboard unavailable: ...` and never falls
+back to `wl-copy`. `woints status` shows `pointer` and `clipboard`
+availability.
+
+The `[input]`, `[modifiers]` and `actions.default` keys are constants with
+the defaults above until the config loader lands (M5).
 
 ## Performance
 

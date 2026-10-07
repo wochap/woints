@@ -8,7 +8,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
-use woints_core::model::{ActionKind, ElementId, Scope};
+use woints_core::act::Axis;
+use woints_core::model::{Action, ElementId, Scope};
 use woints_core::proto::{
     ActReply, BenchReply, Request, Response, SnapshotReply, StatusReply, socket_path,
 };
@@ -29,9 +30,9 @@ enum Cmd {
     Hints {
         #[arg(long, default_value = "focused")]
         scope: Scope,
-        /// activate | focus | left | right | middle | double | hover
+        /// click | right | middle | double | hover | focus | drag | scroll | copy
         #[arg(long)]
-        action: Option<ActionKind>,
+        action: Option<Action>,
     },
     /// Hide hints.
     Cancel,
@@ -50,9 +51,18 @@ enum Cmd {
         snapshot: u64,
         #[arg(long)]
         id: u32,
-        /// activate | focus | left | right | middle | double | hover
-        #[arg(long, default_value = "activate")]
-        action: ActionKind,
+        /// click | right | middle | double | hover | focus | drag | scroll | copy
+        #[arg(long, default_value = "click")]
+        action: Action,
+        /// Drag destination element id.
+        #[arg(long)]
+        to: Option<u32>,
+        /// Scroll axis: v | h (vertical | horizontal).
+        #[arg(long)]
+        axis: Option<Axis>,
+        /// Scroll lines; negative scrolls up or left.
+        #[arg(long, allow_negative_numbers = true)]
+        amount: Option<i32>,
     },
     /// Run the pipeline N times (no overlay) and print p50/p95 per stage.
     Bench {
@@ -63,9 +73,9 @@ enum Cmd {
     },
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let (req, timeout) = match cli.cmd {
+/// The request for `cmd` and the reply timeout in seconds.
+fn to_request(cmd: Cmd) -> (Request, u64) {
+    match cmd {
         Cmd::Hints { scope, action } => (Request::Hints { scope, action }, 5),
         Cmd::Cancel => (Request::Cancel, 5),
         Cmd::Status => (Request::Status, 5),
@@ -76,15 +86,26 @@ fn main() -> ExitCode {
             snapshot,
             id,
             action,
+            to,
+            axis,
+            amount,
         } => (
             Request::Act {
                 snapshot_id: snapshot,
                 id: ElementId(id),
                 action,
+                to: to.map(ElementId),
+                axis,
+                amount,
             },
             10,
         ),
-    };
+    }
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let (req, timeout) = to_request(cli.cmd);
     let path = socket_path();
     let Ok(mut stream) = UnixStream::connect(&path) else {
         eprintln!("wointsd is not running (socket: {})", path.display());
@@ -133,6 +154,8 @@ fn print_human(req: &Request, resp: &Response) {
                     "overlay   {}",
                     if s.overlay { "running" } else { "unavailable" }
                 );
+                println!("pointer   {}", s.pointer);
+                println!("clipboard {}", s.clipboard);
                 for o in &s.outputs {
                     let r = o.rect;
                     let f = if o.focused { " *" } else { "" };
@@ -225,5 +248,60 @@ fn print_human(req: &Request, resp: &Response) {
                 println!("{}", parts.join(" "));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wire(args: &[&str]) -> Value {
+        let cli = Cli::try_parse_from(args).unwrap();
+        serde_json::to_value(to_request(cli.cmd).0).unwrap()
+    }
+
+    #[test]
+    fn hints_action() {
+        assert_eq!(
+            wire(&["woints", "hints", "--action", "drag"]),
+            serde_json::json!({"cmd":"hints","scope":"focused","action":"drag"})
+        );
+    }
+
+    #[test]
+    fn act_drag_and_scroll() {
+        assert_eq!(
+            wire(&[
+                "woints",
+                "act",
+                "--snapshot",
+                "7",
+                "--id",
+                "3",
+                "--action",
+                "drag",
+                "--to",
+                "9"
+            ]),
+            serde_json::json!({"cmd":"act","snapshot_id":7,"id":3,"action":"drag","to":9})
+        );
+        assert_eq!(
+            wire(&[
+                "woints",
+                "act",
+                "--snapshot",
+                "7",
+                "--id",
+                "3",
+                "--action",
+                "scroll",
+                "--axis",
+                "v",
+                "--amount",
+                "-3"
+            ]),
+            serde_json::json!({"cmd":"act","snapshot_id":7,"id":3,"action":"scroll","axis":"vertical","amount":-3})
+        );
+        assert!(Cli::try_parse_from(["woints", "hints", "--action", "teleport"]).is_err());
     }
 }

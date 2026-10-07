@@ -10,11 +10,53 @@ use woints_core::geom::{
     Device, OutputGeom, OutputLocal, Rect, Size, global_to_output, output_to_device,
 };
 use woints_core::place::chip_rect;
-use woints_core::ports::{BadgeStyle, Chip, Scene};
+use woints_core::ports::{BadgeStyle, Chip, Scene, ScrollValue};
 use woints_core::theme::{Color, HintLayout, PrefixStyle, font_device_px, size_factor};
 
 /// Opacity of eliminated badges with `hint.eliminated = "fade"`.
 pub const FADED_ALPHA: f32 = 0.2;
+
+/// Scroll mode stroke width and inset, logical px (design §06).
+pub const SCROLL_STROKE: i32 = 2;
+pub const SCROLL_INSET: i32 = 1;
+/// Scroll rail width, logical px.
+pub const RAIL_W: i32 = 3;
+/// Drag swatch side in the chip, logical px.
+pub const SWATCH: i32 = 8;
+
+/// Rect the scroll stroke occupies: the container inset by 1 px.
+pub fn scroll_stroke_rect<S>(r: Rect<S>) -> Rect<S> {
+    r.inflate(-SCROLL_INSET)
+}
+
+/// Rail inside the stroke at the container's right edge.
+pub fn rail_rect<S>(r: Rect<S>) -> Rect<S> {
+    let s = scroll_stroke_rect(r);
+    let pad = SCROLL_STROKE + 1;
+    Rect::new(
+        s.right() - pad - RAIL_W,
+        s.y + pad,
+        RAIL_W,
+        (s.h - 2 * pad).max(0),
+    )
+}
+
+/// Thumb `(offset, length)` along a rail of `rail` px for a viewport of
+/// `viewport` px: length is `viewport / content`, content being the viewport
+/// plus the value range.
+pub fn rail_thumb(rail: i32, viewport: i32, v: ScrollValue) -> (i32, i32) {
+    let range = (v.max - v.min).max(0.0);
+    let content = f64::from(viewport.max(1)) + range;
+    let len = ((f64::from(rail) * f64::from(viewport.max(1)) / content).round() as i32)
+        .clamp(RAIL_W.min(rail), rail);
+    let frac = if range > 0.0 {
+        ((v.current - v.min) / range).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let off = (f64::from(rail - len) * frac).round() as i32;
+    (off, len)
+}
 
 /// Atkinson Hyperlegible Mono Bold, SIL OFL 1.1 (see `assets/OFL.txt`).
 pub static FONT_BYTES: &[u8] = include_bytes!("../assets/AtkinsonHyperlegibleMono-Bold.ttf");
@@ -70,7 +112,28 @@ impl Renderer {
         let border = (g.scale.floor() as i32).max(1);
 
         let mut local_badges = Vec::new();
-        for b in scene.badges.iter().filter(|b| b.output == g.id) {
+        if let Some(f) = scene.scroll.as_ref().filter(|f| f.output == g.id) {
+            let local = global_to_output(f.rect, g);
+            let stroke = output_to_device(scroll_stroke_rect(local), g.scale);
+            let w = (SCROLL_STROKE as f32 * g.scale).round().max(1.0) as i32;
+            ring(&mut pm, stroke, w, tokens.scroll);
+            if let Some(v) = f.value {
+                let rail = rail_rect(local);
+                let (off, len) = rail_thumb(rail.h, local.h, v);
+                fill_rect_a(&mut pm, output_to_device(rail, g.scale), tokens.scroll, 0.3);
+                let thumb = Rect::new(rail.x, rail.y + off, rail.w, len);
+                fill_rect(&mut pm, output_to_device(thumb, g.scale), tokens.scroll);
+            }
+        }
+        if let Some(o) = scene.pinned.as_ref().filter(|o| o.output == g.id) {
+            let dev = output_to_device(global_to_output(o.rect, g), g.scale);
+            ring(&mut pm, dev, border, tokens.drag_bg);
+        }
+        let badges = scene
+            .badges
+            .iter()
+            .filter(|b| b.output == g.id && scene.scroll.is_none());
+        for b in badges {
             let local = global_to_output(b.rect, g);
             local_badges.push(local);
             let mut dev = output_to_device(local, g.scale);
@@ -88,11 +151,13 @@ impl Renderer {
                 BadgeStyle::Normal => (tokens.bg, tokens.border, 1.0),
                 BadgeStyle::Flash => (tokens.flash_bg, tokens.flash_bg, 1.0),
                 BadgeStyle::Faded => (tokens.bg, tokens.border, FADED_ALPHA),
+                BadgeStyle::Drag => (tokens.drag_bg, tokens.drag_bg, 1.0),
             };
             self.draw_box(&mut pm, dev, radius, border, bg, bd, alpha);
             let colors: Vec<Color> = (0..label.chars().count())
                 .map(|i| match (b.style, b.matched, hint.prefix_style) {
                     (BadgeStyle::Flash, _, _) => tokens.flash_fg,
+                    (BadgeStyle::Drag, _, _) => tokens.drag_fg,
                     (_, 0, _) => tokens.fg,
                     (_, m, PrefixStyle::HighlightMatched) if i < m => tokens.accent,
                     (_, _, PrefixStyle::HighlightMatched) => tokens.fg_dim,
@@ -202,15 +267,27 @@ impl Renderer {
         let hint: &HintLayout = &scene.theme.hint;
         let tokens = &scene.theme.tokens;
         let layout = &scene.theme.chip;
-        let segs: Vec<&str> = [chip.mode.as_str(), chip.typed.as_str(), chip.scope.as_str()]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect();
+        let typed_seg = !chip.typed.is_empty();
+        let mut segs: Vec<(String, Color)> = Vec::new();
+        let mode = match &chip.sub {
+            Some(sub) => format!("{} · {sub}", chip.mode),
+            None => chip.mode.clone(),
+        };
+        segs.push((mode, tokens.fg));
+        if typed_seg {
+            segs.push((chip.typed.clone(), tokens.accent));
+        }
+        segs.push((chip.scope.as_str().to_owned(), tokens.fg));
+        segs.retain(|(s, _)| !s.is_empty());
         let pad = 8;
+        let swatch = if chip.swatch { SWATCH + pad / 2 } else { 0 };
         let seg_w: Vec<i32> = segs
             .iter()
-            .map(|s| {
-                (s.chars().count() as f32 * hint.advance_em * hint.size).ceil() as i32 + 2 * pad
+            .enumerate()
+            .map(|(i, (s, _))| {
+                let w = (s.chars().count() as f32 * hint.advance_em * hint.size).ceil() as i32
+                    + 2 * pad;
+                if i == 0 { w + swatch } else { w }
             })
             .collect();
         let total: i32 = seg_w.iter().sum::<i32>() + (segs.len() as i32 - 1).max(0);
@@ -231,14 +308,28 @@ impl Renderer {
         );
 
         let mut x = rect.x;
-        for (i, (s, w)) in segs.iter().zip(&seg_w).enumerate() {
-            let seg = output_to_device(Rect::new(x, rect.y, *w, rect.h), g.scale);
-            let color = if i == 1 && segs.len() == 3 {
-                tokens.accent
+        for (i, ((s, color), w)) in segs.iter().zip(&seg_w).enumerate() {
+            let mut text_x = x;
+            let mut text_w = *w;
+            if i == 0 && chip.swatch {
+                let sq = Rect::new(x + pad, rect.y + (rect.h - SWATCH) / 2, SWATCH, SWATCH);
+                fill_rect(pm, output_to_device(sq, g.scale), tokens.drag_bg);
+                text_x += swatch;
+                text_w -= swatch;
+            }
+            let seg = output_to_device(Rect::new(text_x, rect.y, text_w, rect.h), g.scale);
+            if let Some((mode, _)) = s.split_once(" · ").filter(|_| i == 0) {
+                // Mode in fg, sub-text dimmed.
+                let n = mode.chars().count();
+                let colors: Vec<Color> = s
+                    .chars()
+                    .enumerate()
+                    .map(|(k, _)| if k < n { *color } else { tokens.fg_dim })
+                    .collect();
+                self.draw_text(pm, seg, s, font_px, &colors, 1.0);
             } else {
-                tokens.fg
-            };
-            self.draw_text(pm, seg, s, font_px, &[color], 1.0);
+                self.draw_text(pm, seg, s, font_px, &[*color], 1.0);
+            }
             x += w;
             if i + 1 < segs.len() {
                 let div = output_to_device(Rect::new(x, rect.y + 4, 1, rect.h - 8), g.scale);
@@ -250,10 +341,6 @@ impl Renderer {
     }
 }
 
-fn paint(c: Color) -> Paint<'static> {
-    paint_a(c, 1.0)
-}
-
 fn paint_a(c: Color, alpha: f32) -> Paint<'static> {
     let mut p = Paint::default();
     p.set_color_rgba8(c.r, c.g, c.b, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8);
@@ -262,9 +349,24 @@ fn paint_a(c: Color, alpha: f32) -> Paint<'static> {
 }
 
 fn fill_rect(pm: &mut Pixmap, r: Rect<Device>, c: Color) {
+    fill_rect_a(pm, r, c, 1.0);
+}
+
+fn fill_rect_a(pm: &mut Pixmap, r: Rect<Device>, c: Color, alpha: f32) {
     if let Some(rect) = tiny_skia::Rect::from_xywh(r.x as f32, r.y as f32, r.w as f32, r.h as f32) {
-        pm.fill_rect(rect, &paint(c), Transform::identity(), None);
+        let mut p = paint_a(c, alpha);
+        p.anti_alias = false;
+        pm.fill_rect(rect, &p, Transform::identity(), None);
     }
+}
+
+/// A `w` px band just inside `r`.
+fn ring(pm: &mut Pixmap, r: Rect<Device>, w: i32, c: Color) {
+    let w = w.min(r.w / 2).min(r.h / 2).max(1);
+    fill_rect(pm, Rect::new(r.x, r.y, r.w, w), c);
+    fill_rect(pm, Rect::new(r.x, r.bottom() - w, r.w, w), c);
+    fill_rect(pm, Rect::new(r.x, r.y + w, w, r.h - 2 * w), c);
+    fill_rect(pm, Rect::new(r.right() - w, r.y + w, w, r.h - 2 * w), c);
 }
 
 fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
@@ -399,6 +501,8 @@ mod tests {
                 style,
             }],
             chip: None,
+            pinned: None,
+            scroll: None,
             theme,
         };
         let pm = Renderer::new().render(&scene, &output(1.0));
@@ -432,6 +536,8 @@ mod tests {
                 style: BadgeStyle::Normal,
             }],
             chip: None,
+            pinned: None,
+            scroll: None,
             theme,
         };
         let pm = Renderer::new().render(&scene, &output(scale));
@@ -454,6 +560,8 @@ mod tests {
             outputs: vec![],
             badges: vec![],
             chip: None,
+            pinned: None,
+            scroll: None,
             theme: Theme::default(),
         };
         let pm = Renderer::new().render(&scene, &o);
@@ -474,6 +582,8 @@ mod tests {
                 style: BadgeStyle::Normal,
             }],
             chip: None,
+            pinned: None,
+            scroll: None,
             theme,
         };
         let pm = Renderer::new().render(&scene, &output(2.0));
@@ -491,16 +601,162 @@ mod tests {
             badges: vec![],
             chip: Some(Chip {
                 mode: "click".into(),
+                sub: None,
+                swatch: false,
                 typed: "s".into(),
                 scope: woints_core::Scope::Focused,
                 output: OutputId("T".into()),
             }),
+            pinned: None,
+            scroll: None,
             theme: Theme::default(),
         };
         let pm = Renderer::new().render(&scene, &output(1.0));
         let (x, y, w, h) = bbox(&pm);
         assert_eq!(x + w, 200 - 12);
         assert_eq!((y, h), (100 - 12 - 22, 22));
+    }
+
+    fn count_rgb(pm: &Pixmap, c: Color) -> usize {
+        pm.data()
+            .chunks_exact(4)
+            .filter(|p| p[0] == c.r && p[1] == c.g && p[2] == c.b && p[3] == 255)
+            .count()
+    }
+
+    fn big() -> OutputSurface {
+        let mut o = output(1.0);
+        o.geom.logical_size = Size { w: 600, h: 500 };
+        o
+    }
+
+    #[test]
+    fn drag_pinned_source() {
+        let theme = Theme::default();
+        let t = theme.tokens.clone();
+        let badge = |label: &str, x: i32, style| Badge {
+            label: label.into(),
+            rect: Rect::new(x, 10, 22, 17),
+            output: OutputId("T".into()),
+            matched: 0,
+            style,
+        };
+        let source = Rect::new(100, 100, 50, 40);
+        let scene = Scene {
+            outputs: vec![],
+            badges: vec![
+                badge("as", 10, BadgeStyle::Drag),
+                badge("d", 60, BadgeStyle::Normal),
+            ],
+            chip: None,
+            pinned: Some(woints_core::ports::Outline {
+                rect: source,
+                output: OutputId("T".into()),
+            }),
+            scroll: None,
+            theme,
+        };
+        let pm = Renderer::new().render(&scene, &big());
+        // Outline: 1 px ring around the source rect.
+        let px = |x, y| {
+            let p = pm.pixel(x, y).unwrap();
+            (p.red(), p.green(), p.blue(), p.alpha())
+        };
+        let drag = (t.drag_bg.r, t.drag_bg.g, t.drag_bg.b, 255);
+        assert_eq!(px(100, 100), drag);
+        assert_eq!(px(149, 139), drag);
+        assert_eq!(px(101, 101).3, 0);
+        assert_eq!(px(99, 99).3, 0);
+        // Exactly one badge uses drag_bg: the badge area x < 40.
+        let in_badges = (10..40)
+            .flat_map(|x| (10..27).map(move |y| (x, y)))
+            .filter(|&(x, y)| px(x, y) == drag)
+            .count();
+        assert!(in_badges > 0);
+        let other = (60..90)
+            .flat_map(|x| (10..27).map(move |y| (x, y)))
+            .filter(|&(x, y)| px(x, y) == drag)
+            .count();
+        assert_eq!(other, 0);
+    }
+
+    #[test]
+    fn scroll_stroke_hides_badges() {
+        let theme = Theme::default();
+        let t = theme.tokens.clone();
+        let rect = Rect::<Global>::new(100, 100, 400, 300);
+        assert_eq!(scroll_stroke_rect(rect), Rect::new(101, 101, 398, 298));
+        let scene = |value| Scene {
+            outputs: vec![],
+            badges: vec![Badge {
+                label: "as".into(),
+                rect: Rect::new(10, 10, 22, 17),
+                output: OutputId("T".into()),
+                matched: 0,
+                style: BadgeStyle::Normal,
+            }],
+            chip: None,
+            pinned: None,
+            scroll: Some(woints_core::ports::ScrollFrame {
+                rect,
+                output: OutputId("T".into()),
+                value,
+            }),
+            theme: theme.clone(),
+        };
+        let pm = Renderer::new().render(&scene(None), &big());
+        assert_eq!(bbox(&pm), (101, 101, 398, 298));
+        // 2 px stroke: (101,101) and (102,102) set, (103,103) clear.
+        assert_eq!(pm.pixel(102, 102).unwrap().alpha(), 255);
+        assert_eq!(pm.pixel(103, 103).unwrap().alpha(), 0);
+        assert_eq!(count_rgb(&pm, t.bg), 0);
+        // With a value: rail pixels inside the stroke.
+        let v = ScrollValue {
+            current: 0.0,
+            min: 0.0,
+            max: 300.0,
+        };
+        let pm = Renderer::new().render(&scene(Some(v)), &big());
+        let rail = rail_rect(rect);
+        assert_eq!(pm.pixel(rail.x as u32, rail.y as u32).unwrap().alpha(), 255);
+    }
+
+    #[test]
+    fn thumb_geometry() {
+        let v = |current| ScrollValue {
+            current,
+            min: 0.0,
+            max: 300.0,
+        };
+        assert_eq!(rail_thumb(100, 300, v(0.0)), (0, 50));
+        assert_eq!(rail_thumb(100, 300, v(300.0)), (50, 50));
+        assert_eq!(rail_thumb(100, 300, v(150.0)), (25, 50));
+    }
+
+    #[test]
+    fn drag_chip_has_swatch() {
+        let theme = Theme::default();
+        let t = theme.tokens.clone();
+        let chip = |swatch| Scene {
+            outputs: vec![],
+            badges: vec![],
+            chip: Some(Chip {
+                mode: "drag 2/2".into(),
+                sub: Some("pick destination".into()),
+                swatch,
+                typed: String::new(),
+                scope: woints_core::Scope::Focused,
+                output: OutputId("T".into()),
+            }),
+            pinned: None,
+            scroll: None,
+            theme: theme.clone(),
+        };
+        let with = Renderer::new().render(&chip(true), &big());
+        let without = Renderer::new().render(&chip(false), &big());
+        assert_eq!(count_rgb(&with, t.drag_bg), (SWATCH * SWATCH) as usize);
+        assert_eq!(count_rgb(&without, t.drag_bg), 0);
+        assert!(count_rgb(&with, t.fg_dim) > 0);
     }
 
     #[test]

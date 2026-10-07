@@ -9,11 +9,11 @@ use woints_core::geom::{
     window_to_global,
 };
 use woints_core::labels::{PriorityItem, assign, labels, priority};
-use woints_core::model::{ActionKind, Element, ElementId, ElementSource, Scope, Target, Timings};
+use woints_core::model::{Action, Element, ElementId, ElementSource, Scope, Target, Timings};
 use woints_core::place::{PlaceInput, badge_size, place};
 use woints_core::ports::{
-    Badge, BadgeStyle, Budget, Chip, CollectReport, Collected, ElementProvider, ProviderError,
-    Scene, SelectError,
+    Badge, BadgeStyle, Budget, Chip, CollectReport, Collected, ElementProvider, Outline,
+    ProviderError, Scene, SelectError,
 };
 use woints_core::theme::Theme;
 use woints_hypr::{Client, focused_target};
@@ -87,7 +87,8 @@ impl ElementProvider for DemoProvider {
                 role: "demo".into(),
                 name: name.into(),
                 source: ElementSource::Demo,
-                actions: vec![ActionKind::Pointer],
+                actions: Action::supported(&[]),
+                caps: vec![],
                 confidence: 1.0,
                 handle: None,
             })
@@ -101,6 +102,101 @@ impl ElementProvider for DemoProvider {
             timings: Timings::default(),
         })
     }
+}
+
+/// Whether `e` gets a hint for `action`: scroll hints only containers (all
+/// elements for pointer-only targets), other actions skip containers and
+/// elements that do not support them.
+pub fn hintable(e: &Element, action: Action) -> bool {
+    let container = woints_a11y::rule::is_scroll_container(&e.role);
+    match action {
+        Action::Scroll => container || e.caps.is_empty(),
+        a => !container && e.actions.contains(&a),
+    }
+}
+
+/// Chip text for `action`'s first phase: mode, sub-text, drag swatch.
+pub fn chip_mode(action: Action) -> (&'static str, Option<&'static str>) {
+    match action {
+        Action::Click => ("click", None),
+        Action::Right => ("right-click", None),
+        Action::Middle => ("middle", None),
+        Action::Double => ("double", None),
+        Action::Hover => ("hover", None),
+        Action::Focus => ("focus", None),
+        Action::Drag => ("drag 1/2", Some("pick source")),
+        Action::Scroll => ("scroll", Some("pick container")),
+        Action::Copy => ("copy-text", None),
+    }
+}
+
+pub fn set_chip(scene: &mut Scene, mode: &str, sub: Option<&str>, swatch: bool) {
+    if let Some(c) = scene.chip.as_mut() {
+        c.mode = mode.to_owned();
+        c.sub = sub.map(str::to_owned);
+        c.swatch = swatch;
+        c.typed.clear();
+    }
+}
+
+/// Drag phase 2 (design §07): fresh labels for every element but `source`
+/// from an alphabet without the source label's glyphs; the source badge
+/// keeps its label, pinned in the drag style with an outline.
+#[allow(clippy::too_many_arguments)]
+pub fn second_scene(
+    first: &Scene,
+    elements: &[Element],
+    source: usize,
+    source_label: &str,
+    targets: &[Target],
+    focused_output: Option<&OutputId>,
+    scope: Scope,
+    theme: &Theme,
+) -> (Scene, Vec<String>) {
+    let mut t = theme.clone();
+    t.hint.alphabet = theme
+        .hint
+        .alphabet
+        .chars()
+        .filter(|c| !source_label.contains(*c))
+        .collect();
+    let rest: Vec<Element> = elements
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != source)
+        .map(|(_, e)| e.clone())
+        .collect();
+    let mut timings = Timings::default();
+    let (mut scene, rest_labels) = build_scene(
+        &rest,
+        targets,
+        &first.outputs,
+        focused_output,
+        scope,
+        &t,
+        &mut timings,
+    );
+    scene.theme = theme.clone();
+    let mut labels = rest_labels;
+    labels.insert(source, String::new());
+    if let Some(b) = first.badges.iter().find(|b| b.label == source_label) {
+        scene.badges.push(Badge {
+            style: BadgeStyle::Drag,
+            matched: 0,
+            ..b.clone()
+        });
+    }
+    let e = &elements[source];
+    scene.pinned =
+        woints_core::geom::pick_output(e.rect, &first.outputs, focused_output).map(|output| {
+            Outline {
+                rect: e.rect,
+                output,
+            }
+        });
+    scene.chip = first.chip.clone();
+    set_chip(&mut scene, "drag 2/2", Some("pick destination"), true);
+    (scene, labels)
 }
 
 fn stage<T>(timings: &mut Timings, name: &str, started: Instant, v: T) -> T {
@@ -181,8 +277,12 @@ pub fn build_scene(
     let scene = Scene {
         outputs: outputs.to_vec(),
         badges,
+        pinned: None,
+        scroll: None,
         chip: chip_output.map(|output| Chip {
             mode: "click".into(),
+            sub: None,
+            swatch: false,
             typed: String::new(),
             scope,
             output,
@@ -209,6 +309,9 @@ pub fn filter_scene(
         .iter()
         .filter_map(|b| {
             let mut b = b.clone();
+            if b.style == BadgeStyle::Drag {
+                return Some(b);
+            }
             if flash == Some(b.label.as_str()) {
                 b.style = BadgeStyle::Flash;
                 b.matched = b.label.chars().count();
@@ -231,10 +334,12 @@ pub fn filter_scene(
 }
 
 /// Run select → collect → label → place on already queried Hyprland state.
+/// With `action`, only elements [`hintable`] for it are kept.
 /// `render`/`commit` are the caller's (they need the overlay or a renderer).
 pub async fn run<P: ElementProvider + Sync>(
     hypr: HyprState,
     scope: Scope,
+    action: Option<Action>,
     theme: &Theme,
     mut timings: Timings,
     provider: &P,
@@ -282,6 +387,9 @@ pub async fn run<P: ElementProvider + Sync>(
                 });
             }
         }
+    }
+    if let Some(a) = action {
+        elements.retain(|e| hintable(e, a));
     }
     for (n, e) in elements.iter_mut().enumerate() {
         e.id = ElementId(n as u32 + 1);
@@ -354,6 +462,7 @@ mod tests {
         run(
             h,
             Scope::Focused,
+            None,
             &Theme::default(),
             Timings::default(),
             &DemoProvider,
@@ -432,6 +541,7 @@ mod tests {
         let o = run(
             h,
             Scope::Focused,
+            None,
             &Theme::default(),
             Timings::default(),
             &DemoProvider,
@@ -452,6 +562,7 @@ mod tests {
             run(
                 h,
                 Scope::All,
+                None,
                 &Theme::default(),
                 Timings::default(),
                 &DemoProvider
@@ -460,5 +571,63 @@ mod tests {
             .unwrap_err(),
             SelectError::Unsupported(Scope::All)
         );
+    }
+
+    #[tokio::test]
+    async fn drag_phase_two_excludes_source() {
+        let o = run_on(window(-1500, 100)).await;
+        let theme = Theme::default();
+        let source = o.labels.iter().position(|l| l == "a").unwrap();
+        let (scene, labels) = second_scene(
+            &o.scene,
+            &o.elements,
+            source,
+            "a",
+            &o.targets,
+            None,
+            Scope::Focused,
+            &theme,
+        );
+        assert_eq!(labels.len(), o.elements.len());
+        assert_eq!(labels[source], "");
+        assert!(labels.iter().all(|l| !l.contains('a')));
+        let drag: Vec<_> = scene
+            .badges
+            .iter()
+            .filter(|b| b.style == BadgeStyle::Drag)
+            .collect();
+        assert_eq!(drag.len(), 1);
+        assert_eq!(drag[0].label, "a");
+        assert_eq!(scene.pinned.as_ref().unwrap().rect, o.elements[source].rect);
+        let chip = scene.chip.as_ref().unwrap();
+        assert_eq!(
+            (chip.mode.as_str(), chip.sub.as_deref(), chip.swatch),
+            ("drag 2/2", Some("pick destination"), true)
+        );
+        // Typing keeps the pinned source drawn.
+        let f = filter_scene(&scene, "s", &[], false, None);
+        assert!(f.badges.iter().any(|b| b.style == BadgeStyle::Drag));
+    }
+
+    #[test]
+    fn hintable_by_action() {
+        use woints_core::model::AtspiCap;
+        let el = |role: &str, caps: Vec<AtspiCap>| Element {
+            id: ElementId(1),
+            rect: Rect::new(0, 0, 1, 1),
+            role: role.into(),
+            name: String::new(),
+            source: ElementSource::Atspi,
+            actions: Action::supported(&caps),
+            caps,
+            confidence: 1.0,
+            handle: None,
+        };
+        let pane = el("scroll pane", vec![AtspiCap::Accessible]);
+        let button = el("push button", vec![AtspiCap::DoAction]);
+        let vision = el("vision", vec![]);
+        assert!(hintable(&pane, Action::Scroll) && !hintable(&pane, Action::Click));
+        assert!(!hintable(&button, Action::Scroll) && hintable(&button, Action::Click));
+        assert!(hintable(&vision, Action::Scroll) && !hintable(&vision, Action::Focus));
     }
 }

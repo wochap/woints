@@ -1,8 +1,10 @@
-//! Maps a real layer surface. Opt-in: `WOINTS_LIVE_TESTS=1 cargo test -p woints-overlay --test live`.
-//! Steals keyboard focus for ~500 ms on the focused output.
+//! Live Wayland tests. Opt-in: `WOINTS_LIVE_TESTS=1 cargo test -p woints-overlay --test live`.
+//! `maps_on_focused_output_for_500ms` steals keyboard focus for ~500 ms on
+//! the focused output; the virtual pointer test sends no pointer events.
 
 use std::time::Duration;
 
+use woints_core::act::VirtualPointer;
 use woints_core::geom::{OutputGeom, OutputId, Point, Rect};
 use woints_core::ports::{Badge, BadgeStyle, Overlay, Scene};
 use woints_core::theme::Theme;
@@ -30,6 +32,8 @@ async fn maps_on_focused_output_for_500ms() {
             style: BadgeStyle::Normal,
         }],
         chip: None,
+        pinned: None,
+        scroll: None,
         theme: Theme::default(),
     };
     let (overlay, _events) = woints_overlay::spawn().expect("overlay starts");
@@ -38,4 +42,22 @@ async fn maps_on_focused_output_for_500ms() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     overlay.hide().unwrap();
     assert!(timings.render_ms >= 0.0);
+}
+
+#[tokio::test]
+async fn virtual_pointer_binds_and_roundtrips() {
+    if std::env::var("WOINTS_LIVE_TESTS").as_deref() != Ok("1") {
+        return;
+    }
+    let (overlay, _events) = woints_overlay::spawn().expect("overlay starts");
+    assert!(
+        overlay.caps().pointer,
+        "zwlr_virtual_pointer_manager_v1 bound"
+    );
+    eprintln!("clipboard protocol: {:?}", overlay.caps().clipboard);
+    let link = overlay.pointer_link();
+    tokio::time::timeout(Duration::from_secs(2), link.roundtrip())
+        .await
+        .expect("roundtrip in time")
+        .expect("roundtrip ok");
 }

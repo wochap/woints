@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use woints_a11y::{A11yConnection, AtspiActuator, AtspiProvider};
-use woints_core::geom::OutputId;
-use woints_core::model::{ActionKind, Element, ElementId, Scope, Target, Timings};
+use woints_core::act::{ActuatorKind, ActuatorRouting, Axis, InputConfig, PointerKind};
+use woints_core::geom::{OutputId, pick_output};
+use woints_core::model::{Action, Element, ElementId, Scope, Target, Timings};
 use woints_core::ports::{
     ActError, Actuator, Budget, CollectReport, Collected, ElementProvider, KeyPress, Overlay,
-    OverlayError, OverlayEvent, ProviderError, Scene,
+    OverlayError, OverlayEvent, ProviderError, Scene, ScrollFrame,
 };
 use woints_core::proto::{
     ActReply, ActionOutcome, BenchReply, BenchRow, HintsReply, OutputInfo, ProviderStatus, Request,
@@ -19,8 +20,9 @@ use woints_core::proto::{
 };
 use woints_core::theme::{Eliminated, Theme};
 use woints_hypr::{Hypr, Monitor};
-use woints_overlay::OverlayHandle;
+use woints_input::{AbsoluteBackend, Backend, MovecursorBackend, PointerActuator};
 use woints_overlay::render::{OutputSurface, Renderer};
+use woints_overlay::{OverlayHandle, PointerLink};
 
 use crate::pipeline::{self, DemoProvider, HyprState};
 use crate::session::{Effect, Input, Session};
@@ -28,10 +30,26 @@ use crate::store::SnapshotStore;
 
 /// Hard cap on the selection flash (design §05).
 const FLASH_CAP_MS: u32 = 120;
-/// How long an action waits for the overlay unmap to commit.
-const UNMAP_TIMEOUT: Duration = Duration::from_millis(500);
-/// xkb `BackSpace`.
+/// xkb keysyms.
 const KEYSYM_BACKSPACE: u32 = 0xff08;
+const KEYSYM_TAB: u32 = 0xff09;
+
+/// Scroll direction of a key in scroll mode: `h j k l` and arrows.
+pub fn scroll_key(keysym: u32) -> Option<(Axis, i32)> {
+    match keysym {
+        0x68 | 0x48 | 0xff51 => Some((Axis::Horizontal, -1)),
+        0x6a | 0x4a | 0xff54 => Some((Axis::Vertical, 1)),
+        0x6b | 0x4b | 0xff52 => Some((Axis::Vertical, -1)),
+        0x6c | 0x4c | 0xff53 => Some((Axis::Horizontal, 1)),
+        _ => None,
+    }
+}
+
+pub const CLIPBOARD_UNAVAILABLE: &str =
+    "clipboard unavailable: zwlr_data_control_v1 not advertised";
+pub const POINTER_UNAVAILABLE: &str = "virtual pointer unavailable";
+
+type Pointer = PointerActuator<Backend<Hypr, PointerLink>>;
 
 /// The element provider in use: AT-SPI, or the demo boxes with `WOINTS_DEMO=1`.
 pub enum Provider {
@@ -56,9 +74,11 @@ impl ElementProvider for Provider {
 }
 
 /// The scene currently on screen, kept so key presses can redraw it.
+#[derive(Clone)]
 struct Shown {
     scene: Scene,
     labels: Vec<String>,
+    targets: Vec<Target>,
 }
 
 /// How long `hints` waits for the overlay to commit.
@@ -67,6 +87,8 @@ const SHOW_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct Daemon {
     pub started: Instant,
     pub theme: Theme,
+    pub input: InputConfig,
+    routing: ActuatorRouting,
     hypr: Option<Hypr>,
     hypr_version: Mutex<Option<String>>,
     monitors: Mutex<Option<Vec<Monitor>>>,
@@ -81,6 +103,8 @@ pub struct Daemon {
     provider: Provider,
     actuator: Option<AtspiActuator>,
     shown: Mutex<Option<Shown>>,
+    /// Phase 1 of the current session, restored by Escape (drag) or Tab (scroll).
+    first: Mutex<Option<Shown>>,
     /// Keycode → label glyph, learned from the overlay's key reports.
     keymap: Mutex<HashMap<u32, char>>,
     pub shutdown: Notify,
@@ -114,9 +138,14 @@ impl Daemon {
         actuator: Option<AtspiActuator>,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<OverlayEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
+        let input = InputConfig::default();
         let d = Arc::new(Self {
             started: Instant::now(),
             theme: Theme::default(),
+            routing: ActuatorRouting {
+                prefer: input.prefer,
+            },
+            input,
             hypr,
             hypr_version: Mutex::new(None),
             monitors: Mutex::new(None),
@@ -131,6 +160,7 @@ impl Daemon {
             provider,
             actuator,
             shown: Mutex::new(None),
+            first: Mutex::new(None),
             keymap: Mutex::new(HashMap::new()),
             shutdown: Notify::new(),
         });
@@ -180,8 +210,9 @@ impl Daemon {
     }
 
     async fn hide_overlay_and_wait(&self) {
+        let timeout = Duration::from_millis(u64::from(self.input.unmap_timeout_ms));
         if let OverlaySlot::Running(h) = &*self.overlay.lock().await {
-            match tokio::time::timeout(UNMAP_TIMEOUT, h.hide_and_wait()).await {
+            match tokio::time::timeout(timeout, h.hide_and_wait()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!("overlay unmap: {e}"),
                 Err(_) => tracing::warn!("overlay unmap not confirmed in time"),
@@ -199,7 +230,9 @@ impl Daemon {
         let (next, effects) = s.transition(input, Instant::now(), self.flash_ms());
         *s = next;
         drop(s);
-        let acting = effects.iter().any(|e| matches!(e, Effect::Act { .. }));
+        let acting = effects
+            .iter()
+            .any(|e| matches!(e, Effect::Act { .. } | Effect::Drag { .. }));
         for e in effects {
             match e {
                 Effect::Redraw(f) => {
@@ -228,6 +261,7 @@ impl Daemon {
                 }
                 Effect::Hide => {
                     *self.shown.lock().await = None;
+                    *self.first.lock().await = None;
                     if acting {
                         self.hide_overlay_and_wait().await;
                     } else {
@@ -238,58 +272,281 @@ impl Daemon {
                     snapshot_id,
                     index,
                     action,
+                } => match self.element(snapshot_id, index).await {
+                    Some(e) => {
+                        let _ = self.act_on(&e, action).await;
+                    }
+                    None => tracing::warn!(snapshot_id, index, "selected element vanished"),
+                },
+                Effect::BeginSecond {
+                    snapshot_id,
+                    source,
+                } => self.begin_second(snapshot_id, source).await,
+                Effect::Drag {
+                    snapshot_id,
+                    from,
+                    to,
                 } => {
-                    let element = self
-                        .store
-                        .lock()
-                        .await
-                        .get(snapshot_id)
-                        .and_then(|s| s.elements.get(index).cloned());
-                    match element {
-                        Some(e) => {
-                            let _ = self.act_on(&e, action).await;
-                        }
-                        None => tracing::warn!(snapshot_id, index, "selected element vanished"),
+                    let (Some(a), Some(b)) = (
+                        self.element(snapshot_id, from).await,
+                        self.element(snapshot_id, to).await,
+                    ) else {
+                        tracing::warn!(snapshot_id, from, to, "drag element vanished");
+                        continue;
+                    };
+                    let _ = self
+                        .recorded(&a, Action::Drag, async {
+                            self.pointer()
+                                .await?
+                                .drag(a.rect.center(), b.rect.center())
+                                .await
+                        })
+                        .await;
+                }
+                Effect::BeginScroll { snapshot_id, index } => {
+                    self.begin_scroll(snapshot_id, index).await
+                }
+                Effect::Scroll {
+                    snapshot_id,
+                    index,
+                    axis,
+                    sign,
+                } => {
+                    let r = match self.pointer().await {
+                        Ok(p) => p.scroll_key(axis, sign).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = r {
+                        tracing::warn!(snapshot_id, index, "scroll: {e}");
+                    }
+                }
+                Effect::ReShow => {
+                    let first = self.first.lock().await.clone();
+                    if let Some(f) = first {
+                        self.update_overlay(f.scene.clone()).await;
+                        *self.shown.lock().await = Some(f);
                     }
                 }
             }
         }
     }
 
+    async fn element(&self, snapshot_id: u64, index: usize) -> Option<Element> {
+        self.store
+            .lock()
+            .await
+            .get(snapshot_id)
+            .and_then(|s| s.elements.get(index).cloned())
+    }
+
+    /// Drag phase 2: relabel without the source's glyphs and pin the source.
+    async fn begin_second(&self, snapshot_id: u64, source: usize) {
+        let Some(first) = self.first.lock().await.clone() else {
+            return;
+        };
+        let Some(elements) = self
+            .store
+            .lock()
+            .await
+            .get(snapshot_id)
+            .map(|s| s.elements.clone())
+        else {
+            return;
+        };
+        let label = first.labels.get(source).cloned().unwrap_or_default();
+        let scope = first
+            .scene
+            .chip
+            .as_ref()
+            .map(|c| c.scope)
+            .unwrap_or_default();
+        let (scene, labels) = pipeline::second_scene(
+            &first.scene,
+            &elements,
+            source,
+            &label,
+            &first.targets,
+            None,
+            scope,
+            &self.theme,
+        );
+        self.update_overlay(scene.clone()).await;
+        *self.shown.lock().await = Some(Shown {
+            scene,
+            labels: labels.clone(),
+            targets: first.targets,
+        });
+        let mut s = self.session.lock().await;
+        let (next, _) = s.transition(Input::SecondShown { labels }, Instant::now(), 0);
+        *s = next;
+    }
+
+    /// Scroll mode: stroke (and rail) around the container, cursor on it.
+    async fn begin_scroll(&self, snapshot_id: u64, index: usize) {
+        let Some(e) = self.element(snapshot_id, index).await else {
+            return;
+        };
+        let Some(first) = self.first.lock().await.clone() else {
+            return;
+        };
+        let value = match &self.actuator {
+            Some(a) if !e.caps.is_empty() => a.scroll_value(&e).await,
+            _ => None,
+        };
+        let mut scene = first.scene.clone();
+        scene.scroll = pick_output(e.rect, &scene.outputs, None).map(|output| ScrollFrame {
+            rect: e.rect,
+            output,
+            value,
+        });
+        pipeline::set_chip(&mut scene, "scroll", Some("hjkl ←↓↑→"), false);
+        self.update_overlay(scene).await;
+        let r = match self.pointer().await {
+            Ok(p) => p.scroll_enter(e.rect).await,
+            Err(e) => Err(e),
+        };
+        if let Err(err) = r {
+            tracing::warn!(element = e.id.0, "scroll mode: {err}");
+        }
+    }
+
     /// Map an overlay key press to a session input. Glyphs are learned per
-    /// keycode, so the glyph shown and the key pressed agree under any layout.
+    /// keycode, so the glyph shown and the key pressed agree under any layout
+    /// and with modifiers held.
     pub async fn key_input(&self, k: &KeyPress) -> Option<Input> {
-        if k.keysym == KEYSYM_BACKSPACE {
-            return Some(Input::Backspace);
+        match k.keysym {
+            KEYSYM_BACKSPACE => return Some(Input::Backspace),
+            KEYSYM_TAB => return Some(Input::Tab),
+            _ => {}
         }
-        if k.mods.ctrl || k.mods.alt || k.mods.logo {
-            return None;
+        if self.state().await == State::Scrolling {
+            return scroll_key(k.keysym).map(|(a, s)| Input::ScrollKey(a, s));
         }
+        let alphabet = &self.theme.hint.alphabet;
+        let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
         let mut map = self.keymap.lock().await;
         let typed = k
             .utf8
             .as_deref()
             .and_then(|s| s.chars().next())
-            .map(|c| c.to_lowercase().next().unwrap_or(c))
-            .filter(|c| self.theme.hint.alphabet.contains(*c));
-        if let Some(c) = typed {
-            map.insert(k.keycode, c);
-            return Some(Input::Glyph(c));
-        }
-        map.get(&k.keycode).copied().map(Input::Glyph)
+            .map(lower)
+            .filter(|c| alphabet.contains(*c))
+            .or_else(|| {
+                char::from_u32(k.keysym)
+                    .filter(char::is_ascii_graphic)
+                    .map(lower)
+                    .filter(|c| alphabet.contains(*c))
+            });
+        let glyph = match typed {
+            Some(c) => {
+                map.insert(k.keycode, c);
+                c
+            }
+            None => *map.get(&k.keycode)?,
+        };
+        Some(Input::Glyph(glyph, self.input.modifiers.mapped(k.mods)))
     }
 
-    /// Run the actuator chain on `e`, recording `status.last_action` and the `act` stage.
-    pub async fn act_on(&self, e: &Element, action: ActionKind) -> Result<(), ActError> {
-        let t = Instant::now();
-        let r = match &self.actuator {
-            Some(a) => a.act(e, action).await,
-            None => Err(ActError::NeedsPointer(action)),
+    /// The pointer actuator over the overlay's virtual pointer.
+    async fn pointer(&self) -> Result<Pointer, ActError> {
+        let unavailable = || ActError::Failed(POINTER_UNAVAILABLE.into());
+        if self.input.pointer == PointerKind::None {
+            return Err(unavailable());
+        }
+        let hypr = self.hypr.clone().ok_or_else(unavailable)?;
+        let link = match &*self.overlay.lock().await {
+            OverlaySlot::Running(h) if h.is_alive() && h.caps().pointer => h.pointer_link(),
+            _ => return Err(unavailable()),
         };
+        let backend = match self.input.pointer {
+            PointerKind::Absolute => Backend::Absolute(AbsoluteBackend {
+                ipc: hypr,
+                pointer: link,
+                outputs: self
+                    .monitors()
+                    .await
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|m| !m.disabled)
+                    .map(Monitor::geom)
+                    .collect(),
+            }),
+            _ => Backend::Movecursor(MovecursorBackend {
+                ipc: hypr,
+                pointer: link,
+            }),
+        };
+        Ok(PointerActuator::new(backend, &self.input))
+    }
+
+    fn pointer_status(&self, caps: Option<woints_core::ports::OverlayCaps>) -> String {
+        match (self.input.pointer, caps) {
+            (PointerKind::None, _) => "unavailable".into(),
+            (k, Some(c)) if c.pointer && self.hypr.is_some() => k.as_str().into(),
+            _ => "unavailable".into(),
+        }
+    }
+
+    /// `copy`: element text to the clipboard through data control.
+    async fn copy(&self, e: &Element) -> Result<(), ActError> {
+        let link = match &*self.overlay.lock().await {
+            OverlaySlot::Running(h) if h.is_alive() && h.caps().clipboard.is_some() => {
+                h.pointer_link()
+            }
+            _ => return Err(ActError::Failed(CLIPBOARD_UNAVAILABLE.into())),
+        };
+        let a = self
+            .actuator
+            .as_ref()
+            .ok_or_else(|| ActError::Failed("copy needs the AT-SPI provider".into()))?;
+        let text = a.text(e).await?;
+        link.set_clipboard(text).await.map_err(ActError::Failed)
+    }
+
+    /// Route `action` on `e` to an actuator (design D16) and run it.
+    async fn perform(&self, e: &Element, action: Action) -> Result<(), ActError> {
+        match self.routing.route(e, action)? {
+            ActuatorKind::DoAction | ActuatorKind::GrabFocus => {
+                let r = match &self.actuator {
+                    Some(a) => a.act(e, action).await,
+                    None => Err(ActError::NeedsPointer(action)),
+                };
+                match r {
+                    Err(ActError::NeedsPointer(_)) => {
+                        tracing::info!(element = e.id.0, %action, "AT-SPI declined; pointer click");
+                        self.pointer().await?.act(Action::Click, e.rect).await
+                    }
+                    r => r,
+                }
+            }
+            ActuatorKind::ReadText => self.copy(e).await,
+            ActuatorKind::Pointer => match action {
+                Action::Drag | Action::Scroll => Err(ActError::Failed(format!(
+                    "{action} needs {}",
+                    if action == Action::Drag {
+                        "a destination (\"to\")"
+                    } else {
+                        "scroll mode or \"axis\"/\"amount\""
+                    }
+                ))),
+                Action::Focus => self.pointer().await?.act(Action::Click, e.rect).await,
+                a => self.pointer().await?.act(a, e.rect).await,
+            },
+        }
+    }
+
+    /// Run `f` for `action` on `e`, recording `status.last_action` and the `act` stage.
+    async fn recorded(
+        &self,
+        e: &Element,
+        action: Action,
+        f: impl std::future::Future<Output = Result<(), ActError>>,
+    ) -> Result<(), ActError> {
+        let t = Instant::now();
+        let r = f.await;
         let elapsed = t.elapsed();
         match &r {
             Ok(()) => tracing::info!(element = e.id.0, %action, name = %e.name, "acted"),
-            Err(ActError::NeedsPointer(a)) => tracing::info!("no actuator for {a}"),
             Err(err) => tracing::warn!(element = e.id.0, %action, "{err}"),
         }
         *self.last_action.lock().await = Some(ActionOutcome {
@@ -300,9 +557,13 @@ impl Daemon {
             ms: elapsed.as_secs_f64() * 1000.0,
         });
         let mut lt = self.last_timings.lock().await;
-        lt.0.retain(|s| s.stage != "act");
-        lt.record("act", elapsed);
+        lt.0.retain(|s| s.stage != Timings::ACT);
+        lt.record(Timings::ACT, elapsed);
         r
+    }
+
+    pub async fn act_on(&self, e: &Element, action: Action) -> Result<(), ActError> {
+        self.recorded(e, action, self.perform(e, action)).await
     }
 
     pub async fn state(&self) -> State {
@@ -353,10 +614,14 @@ impl Daemon {
         Ok(state)
     }
 
-    async fn pipeline(&self, scope: Scope) -> Result<pipeline::Output, String> {
+    async fn pipeline(
+        &self,
+        scope: Scope,
+        action: Option<Action>,
+    ) -> Result<pipeline::Output, String> {
         let mut timings = Timings::default();
         let h = self.query(&mut timings).await?;
-        let out = pipeline::run(h, scope, &self.theme, timings, &self.provider)
+        let out = pipeline::run(h, scope, action, &self.theme, timings, &self.provider)
             .await
             .map_err(|e| e.to_string())?;
         *self.last_collect.lock().await = out.reports.clone();
@@ -365,10 +630,7 @@ impl Daemon {
 
     pub async fn handle(&self, req: Request) -> Response {
         match req {
-            Request::Hints { scope, action } => {
-                self.hints(scope, action.unwrap_or(ActionKind::Activate))
-                    .await
-            }
+            Request::Hints { scope, action } => self.hints(scope, action).await,
             Request::Cancel => {
                 self.apply(Input::Cancel).await;
                 Response::with(&StateReply { state: State::Idle })
@@ -385,40 +647,100 @@ impl Daemon {
                 snapshot_id,
                 id,
                 action,
-            } => self.act(snapshot_id, id, action).await,
+                to,
+                axis,
+                amount,
+            } => self.act(snapshot_id, id, action, to, axis, amount).await,
         }
     }
 
-    async fn act(&self, snapshot_id: u64, id: ElementId, action: ActionKind) -> Response {
-        let element = {
+    async fn act(
+        &self,
+        snapshot_id: u64,
+        id: ElementId,
+        action: Action,
+        to: Option<ElementId>,
+        axis: Option<Axis>,
+        amount: Option<i32>,
+    ) -> Response {
+        let (element, dest) = {
             let store = self.store.lock().await;
             let Some(s) = store.get(snapshot_id) else {
                 return Response::err(format!("unknown snapshot {snapshot_id}"));
             };
-            match s.elements.iter().find(|e| e.id == id) {
-                Some(e) => e.clone(),
-                None => {
-                    return Response::err(format!(
-                        "unknown element {} in snapshot {snapshot_id}",
-                        id.0
-                    ));
-                }
-            }
+            let find = |id: ElementId| s.elements.iter().find(|e| e.id == id).cloned();
+            let Some(e) = find(id) else {
+                return Response::err(format!(
+                    "unknown element {} in snapshot {snapshot_id}",
+                    id.0
+                ));
+            };
+            let dest = match to {
+                Some(t) => match find(t) {
+                    Some(d) => Some(d),
+                    None => {
+                        return Response::err(format!(
+                            "unknown element {} in snapshot {snapshot_id}",
+                            t.0
+                        ));
+                    }
+                },
+                None => None,
+            };
+            (e, dest)
         };
-        match self.act_on(&element, action).await {
+        let r = match (action, dest) {
+            (Action::Drag, Some(d)) => {
+                self.recorded(&element, action, async {
+                    self.routing.route(&element, action)?;
+                    self.routing.route(&d, action)?;
+                    self.pointer()
+                        .await?
+                        .drag(element.rect.center(), d.rect.center())
+                        .await
+                })
+                .await
+            }
+            (Action::Scroll, _) if axis.is_some() || amount.is_some() => {
+                self.recorded(&element, action, async {
+                    self.routing.route(&element, action)?;
+                    let p = self.pointer().await?;
+                    p.scroll_enter(element.rect).await?;
+                    let lines = amount.unwrap_or(self.input.scroll_step as i32);
+                    p.scroll(axis.unwrap_or_default(), lines).await
+                })
+                .await
+            }
+            _ => self.act_on(&element, action).await,
+        };
+        match r {
             Ok(()) => Response::with(&ActReply { performed: action }),
             Err(e) => Response::err(e.to_string()),
         }
     }
 
-    async fn hints(&self, scope: Scope, action: ActionKind) -> Response {
+    async fn hints(&self, scope: Scope, action: Option<Action>) -> Response {
         self.apply(Input::HintsRequested).await;
-        let mut out = match self.pipeline(scope).await {
+        let explicit = action.is_some();
+        let action = action.unwrap_or(self.input.default_action);
+        let mut out = match self.pipeline(scope, Some(action)).await {
             Ok(o) => o,
             Err(e) => return Response::err(e),
         };
-        if let Some(c) = out.scene.chip.as_mut() {
-            c.mode = action.to_string();
+        let (mode, sub) = pipeline::chip_mode(action);
+        pipeline::set_chip(&mut out.scene, mode, sub, false);
+        // A single scroll container is scrolled without picking.
+        let direct = action == Action::Scroll && out.elements.len() == 1;
+        let first_scene = out.scene.clone();
+        if direct {
+            let e = &out.elements[0];
+            out.scene.scroll =
+                pick_output(e.rect, &out.scene.outputs, None).map(|output| ScrollFrame {
+                    rect: e.rect,
+                    output,
+                    value: None,
+                });
+            pipeline::set_chip(&mut out.scene, "scroll", Some("hjkl ←↓↑→"), false);
         }
         if out.targets.is_empty() {
             return Response::with(&HintsReply {
@@ -470,25 +792,38 @@ impl Daemon {
         let n_elements = out.elements.len();
         let id = self.store.lock().await.insert(out.elements);
         *self.last_timings.lock().await = out.timings;
-        *self.shown.lock().await = Some(Shown {
-            scene: out.scene,
+        let shown = Shown {
+            scene: first_scene,
             labels: out.labels.clone(),
-        });
-        self.apply(Input::Shown {
-            snapshot_id: id,
-            labels: out.labels,
-            action,
-        })
-        .await;
+            targets: out.targets,
+        };
+        *self.first.lock().await = Some(shown.clone());
+        *self.shown.lock().await = Some(shown);
+        if direct {
+            self.apply(Input::ScrollDirect {
+                snapshot_id: id,
+                labels: out.labels,
+                index: 0,
+            })
+            .await;
+        } else {
+            self.apply(Input::Shown {
+                snapshot_id: id,
+                labels: out.labels,
+                action,
+                explicit,
+            })
+            .await;
+        }
         Response::with(&HintsReply {
-            state: State::Showing,
+            state: self.state().await,
             targets: Some(n_targets),
             elements: n_elements,
         })
     }
 
     async fn snapshot(&self, scope: Scope) -> Response {
-        match self.pipeline(scope).await {
+        match self.pipeline(scope, None).await {
             Ok(o) => {
                 let id = self.store.lock().await.insert(o.elements.clone());
                 Response::with(&SnapshotReply {
@@ -515,8 +850,11 @@ impl Daemon {
                 focused: m.focused,
             })
             .collect();
-        let overlay =
-            matches!(&*self.overlay.lock().await, OverlaySlot::Running(h) if h.is_alive());
+        let caps = match &*self.overlay.lock().await {
+            OverlaySlot::Running(h) if h.is_alive() => Some(h.caps()),
+            _ => None,
+        };
+        let overlay = caps.is_some();
         Response::with(&StatusReply {
             state: self.state().await,
             version: env!("CARGO_PKG_VERSION").into(),
@@ -528,6 +866,11 @@ impl Daemon {
             providers: vec![self.provider_status()],
             last_collect: self.last_collect.lock().await.clone(),
             last_action: self.last_action.lock().await.clone(),
+            pointer: self.pointer_status(caps),
+            clipboard: match caps.and_then(|c| c.clipboard) {
+                Some(_) => "data-control".into(),
+                None => "unavailable".into(),
+            },
         })
     }
 
@@ -549,7 +892,7 @@ impl Daemon {
         for _ in 0..iterations {
             // Force a fresh monitor query each run so `hypr.query` is honest.
             self.invalidate_monitors().await;
-            let mut o = match self.pipeline(scope).await {
+            let mut o = match self.pipeline(scope, None).await {
                 Ok(o) => o,
                 Err(e) => return Response::err(e),
             };
@@ -667,95 +1010,166 @@ mod tests {
             role: "push button".into(),
             name: "OK".into(),
             source: woints_core::model::ElementSource::Demo,
-            actions: vec![ActionKind::Pointer],
+            actions: Action::supported(&[]),
+            caps: vec![],
             confidence: 1.0,
             handle: None,
+        }
+    }
+
+    fn act(snapshot_id: u64, id: u32, action: Action) -> Request {
+        Request::Act {
+            snapshot_id,
+            id: ElementId(id),
+            action,
+            to: None,
+            axis: None,
+            amount: None,
         }
     }
 
     #[tokio::test]
     async fn act_unknown_snapshot_and_element() {
         let d = demo();
-        let r = d
-            .handle(Request::Act {
-                snapshot_id: 17,
-                id: ElementId(3),
-                action: ActionKind::Activate,
-            })
-            .await;
+        let r = d.handle(act(17, 3, Action::Click)).await;
         assert_eq!(r.error.as_deref(), Some("unknown snapshot 17"));
         let id = d.store.lock().await.insert(vec![element(1)]);
-        let r = d
-            .handle(Request::Act {
-                snapshot_id: id,
-                id: ElementId(3),
-                action: ActionKind::Activate,
-            })
-            .await;
+        let r = d.handle(act(id, 3, Action::Click)).await;
         assert!(!r.ok);
     }
 
     #[tokio::test]
-    async fn needs_pointer_returns_to_idle() {
+    async fn pointer_unavailable_returns_to_idle() {
         let d = demo();
         let id = d.store.lock().await.insert(vec![element(1), element(2)]);
         d.apply(Input::Shown {
             snapshot_id: id,
             labels: vec!["a".into(), "s".into()],
-            action: ActionKind::Right,
+            action: Action::Right,
+            explicit: true,
         })
         .await;
         assert_eq!(d.state().await, State::Showing);
-        d.apply(Input::Glyph('s')).await;
+        d.apply(Input::Glyph('s', None)).await;
         assert_eq!(d.state().await, State::Idle);
         let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
         let a = s.last_action.unwrap();
         assert_eq!(
             (a.element, a.action, a.ok),
-            (ElementId(2), ActionKind::Right, false)
+            (ElementId(2), Action::Right, false)
         );
-        assert_eq!(a.error.as_deref(), Some("no actuator for right"));
+        assert_eq!(a.error.as_deref(), Some(POINTER_UNAVAILABLE));
         assert!(s.last_timings.get("act").is_some());
         assert_eq!(s.providers[0].name, "demo");
+        assert_eq!(
+            (s.pointer.as_str(), s.clipboard.as_str()),
+            ("unavailable", "unavailable")
+        );
     }
 
     #[tokio::test]
-    async fn act_over_socket_reports_needs_pointer() {
+    async fn act_errors() {
         let d = demo();
-        let id = d.store.lock().await.insert(vec![element(1)]);
+        let id = d.store.lock().await.insert(vec![element(1), element(2)]);
+        let r = d.handle(act(id, 1, Action::Click)).await;
+        assert_eq!(r.error.as_deref(), Some(POINTER_UNAVAILABLE));
+        let r = d.handle(act(id, 1, Action::Focus)).await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some(
+                "element 1 does not support focus; supported: click,right,middle,double,hover,drag,scroll"
+            )
+        );
         let r = d
             .handle(Request::Act {
                 snapshot_id: id,
                 id: ElementId(1),
-                action: ActionKind::Activate,
+                action: Action::Drag,
+                to: Some(ElementId(2)),
+                axis: None,
+                amount: None,
             })
             .await;
-        assert_eq!(r.error.as_deref(), Some("no actuator for activate"));
+        assert_eq!(r.error.as_deref(), Some(POINTER_UNAVAILABLE));
+        let r = d.handle(act(id, 1, Action::Drag)).await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("drag needs a destination (\"to\")")
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_without_data_control() {
+        let d = demo();
+        let mut e = element(1);
+        e.caps = vec![woints_core::model::AtspiCap::Accessible];
+        e.actions = Action::supported(&e.caps);
+        let id = d.store.lock().await.insert(vec![e]);
+        let r = d.handle(act(id, 1, Action::Copy)).await;
+        assert_eq!(r.error.as_deref(), Some(CLIPBOARD_UNAVAILABLE));
+    }
+
+    #[tokio::test]
+    async fn drag_session_returns_to_idle() {
+        let d = demo();
+        let id = d
+            .store
+            .lock()
+            .await
+            .insert(vec![element(1), element(2), element(3)]);
+        d.apply(Input::Shown {
+            snapshot_id: id,
+            labels: vec!["a".into(), "s".into(), "d".into()],
+            action: Action::Drag,
+            explicit: true,
+        })
+        .await;
+        d.apply(Input::Glyph('a', None)).await;
+        assert_eq!(d.state().await, State::ShowingSecond);
+        d.apply(Input::Cancel).await;
+        assert_eq!(d.state().await, State::Idle);
     }
 
     #[tokio::test]
     async fn key_mapping() {
         let d = demo();
-        let key = |keycode, utf8: Option<&str>, keysym| KeyPress {
+        let key = |keycode, utf8: Option<&str>, keysym, shift| KeyPress {
             keycode,
             keysym,
             utf8: utf8.map(String::from),
-            mods: Default::default(),
+            mods: woints_core::ports::Modifiers {
+                shift,
+                ..Default::default()
+            },
         };
         assert_eq!(
-            d.key_input(&key(22, None, 0xff08)).await,
+            d.key_input(&key(22, None, 0xff08, false)).await,
             Some(Input::Backspace)
         );
         assert_eq!(
-            d.key_input(&key(38, Some("a"), 0x61)).await,
-            Some(Input::Glyph('a'))
+            d.key_input(&key(23, None, 0xff09, false)).await,
+            Some(Input::Tab)
         );
-        // Same keycode with Shift held still maps to the learned glyph.
         assert_eq!(
-            d.key_input(&key(38, Some("A"), 0x41)).await,
-            Some(Input::Glyph('a'))
+            d.key_input(&key(38, Some("a"), 0x61, false)).await,
+            Some(Input::Glyph('a', None))
         );
-        assert_eq!(d.key_input(&key(24, Some("q"), 0x71)).await, None);
+        // Same keycode with Shift held still maps to the glyph, with the
+        // Shift mapping attached.
+        assert_eq!(
+            d.key_input(&key(38, Some("A"), 0x41, true)).await,
+            Some(Input::Glyph('a', Some(Action::Right)))
+        );
+        assert_eq!(d.key_input(&key(24, Some("q"), 0x71, false)).await, None);
+    }
+
+    #[test]
+    fn scroll_keys() {
+        assert_eq!(scroll_key(0x6a), Some((Axis::Vertical, 1)));
+        assert_eq!(scroll_key(0xff52), Some((Axis::Vertical, -1)));
+        assert_eq!(scroll_key(0x68), Some((Axis::Horizontal, -1)));
+        assert_eq!(scroll_key(0xff53), Some((Axis::Horizontal, 1)));
+        assert_eq!(scroll_key(0x61), None);
     }
 
     #[tokio::test]

@@ -7,6 +7,15 @@ license.workspace = true
 
 [dependencies]
 woints-core.workspace = true
+woints-hypr.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+woints-a11y.workspace = true
+woints-overlay.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

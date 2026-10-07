@@ -6,7 +6,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::geom::{Global, OutputGeom, OutputId, Rect};
-use crate::model::{ActionKind, Element, Scope, Target, Timings};
+use crate::model::{Action, Element, Scope, Target, Timings};
 use crate::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -90,6 +90,8 @@ pub enum BadgeStyle {
     Flash,
     /// Eliminated with `hint.eliminated = "fade"`: 20 % alpha.
     Faded,
+    /// Drag source pinned in phase 2: `drag_bg`/`drag_fg`.
+    Drag,
 }
 
 /// One badge to draw, already placed, in global logical coordinates.
@@ -109,9 +111,38 @@ pub struct Badge {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Chip {
     pub mode: String,
+    /// Dimmed text after the mode (`pick destination`, `hjkl ←↓↑→`).
+    #[serde(default)]
+    pub sub: Option<String>,
+    /// Peach square before the mode (drag phase 2).
+    #[serde(default)]
+    pub swatch: bool,
     pub typed: String,
     pub scope: Scope,
     pub output: OutputId,
+}
+
+/// A rect outlined on one output (drag source, design §07).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Outline {
+    pub rect: Rect<Global>,
+    pub output: OutputId,
+}
+
+/// Scrollbar `Value` of a scroll container: current, minimum, maximum.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ScrollValue {
+    pub current: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+/// Scroll mode frame (design §06): 2 px stroke and an optional rail.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScrollFrame {
+    pub rect: Rect<Global>,
+    pub output: OutputId,
+    pub value: Option<ScrollValue>,
 }
 
 /// Everything the overlay needs to draw one frame.
@@ -121,6 +152,10 @@ pub struct Scene {
     pub outputs: Vec<OutputGeom>,
     pub badges: Vec<Badge>,
     pub chip: Option<Chip>,
+    /// Drag source outline in phase 2.
+    pub pinned: Option<Outline>,
+    /// Scroll mode frame; badges are hidden while set.
+    pub scroll: Option<ScrollFrame>,
     pub theme: Theme,
 }
 
@@ -191,10 +226,13 @@ pub trait Overlay {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActError {
-    /// This actuator cannot perform the action; a pointer actuator (M3) may.
+    /// This actuator cannot perform the action; the pointer actuator may.
     #[error("no actuator for {0}")]
-    NeedsPointer(ActionKind),
-    #[error("action failed: {0}")]
+    NeedsPointer(Action),
+    /// The element does not support the action (message lists what it does).
+    #[error("{0}")]
+    Unsupported(String),
+    #[error("{0}")]
     Failed(String),
 }
 
@@ -204,6 +242,15 @@ pub trait Actuator {
     fn act(
         &self,
         element: &Element,
-        action: ActionKind,
+        action: Action,
     ) -> impl Future<Output = Result<(), ActError>> + Send;
+}
+
+/// Protocols the overlay's Wayland connection offers to actuators.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverlayCaps {
+    /// `zwlr_virtual_pointer_manager_v1` bound and a pointer created.
+    pub pointer: bool,
+    /// Data control protocol name, when advertised.
+    pub clipboard: Option<&'static str>,
 }

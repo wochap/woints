@@ -6,8 +6,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::act::Axis;
 use crate::geom::{Global, OutputId, Rect};
-use crate::model::{ActionKind, Element, ElementId, Scope, Target, Timings};
+use crate::model::{Action, Element, ElementId, Scope, Target, Timings};
 use crate::ports::CollectReport;
 
 /// Socket file name under `$XDG_RUNTIME_DIR`.
@@ -22,19 +23,15 @@ fn default_iterations() -> u32 {
     10
 }
 
-fn default_action() -> ActionKind {
-    ActionKind::Activate
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Hints {
         #[serde(default)]
         scope: Scope,
-        /// Action performed when a label is matched (default `activate`).
+        /// Action performed when a label is matched (default `click`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        action: Option<ActionKind>,
+        action: Option<Action>,
     },
     Cancel,
     Status,
@@ -53,8 +50,16 @@ pub enum Request {
     Act {
         snapshot_id: u64,
         id: ElementId,
-        #[serde(default = "default_action")]
-        action: ActionKind,
+        #[serde(default)]
+        action: Action,
+        /// Drag destination.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<ElementId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<Axis>,
+        /// Scroll lines; negative scrolls up or left.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amount: Option<i32>,
     },
 }
 
@@ -133,6 +138,9 @@ impl Response {
 pub enum State {
     Idle,
     Showing,
+    /// Drag phase 2: picking the destination.
+    ShowingSecond,
+    Scrolling,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,6 +181,12 @@ pub struct StatusReply {
     pub last_collect: Vec<CollectReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_action: Option<ActionOutcome>,
+    /// `movecursor`, `absolute` or `unavailable`.
+    #[serde(default)]
+    pub pointer: String,
+    /// `data-control` or `unavailable`.
+    #[serde(default)]
+    pub clipboard: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -187,7 +201,7 @@ pub struct ProviderStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionOutcome {
     pub element: ElementId,
-    pub action: ActionKind,
+    pub action: Action,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -196,7 +210,7 @@ pub struct ActionOutcome {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActReply {
-    pub performed: ActionKind,
+    pub performed: Action,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -242,17 +256,42 @@ mod tests {
         rt(
             Request::Hints {
                 scope: Scope::All,
-                action: Some(ActionKind::Focus),
+                action: Some(Action::Drag),
             },
-            json!({"cmd":"hints","scope":"all","action":"focus"}),
+            json!({"cmd":"hints","scope":"all","action":"drag"}),
         );
         rt(
             Request::Act {
                 snapshot_id: 17,
                 id: ElementId(3),
-                action: ActionKind::Right,
+                action: Action::Right,
+                to: None,
+                axis: None,
+                amount: None,
             },
             json!({"cmd":"act","snapshot_id":17,"id":3,"action":"right"}),
+        );
+        rt(
+            Request::Act {
+                snapshot_id: 7,
+                id: ElementId(3),
+                action: Action::Drag,
+                to: Some(ElementId(9)),
+                axis: None,
+                amount: None,
+            },
+            json!({"cmd":"act","snapshot_id":7,"id":3,"action":"drag","to":9}),
+        );
+        rt(
+            Request::Act {
+                snapshot_id: 7,
+                id: ElementId(3),
+                action: Action::Scroll,
+                to: None,
+                axis: Some(Axis::Vertical),
+                amount: Some(-3),
+            },
+            json!({"cmd":"act","snapshot_id":7,"id":3,"action":"scroll","axis":"vertical","amount":-3}),
         );
         rt(Request::Cancel, json!({"cmd":"cancel"}));
         rt(Request::Status, json!({"cmd":"status"}));
@@ -297,16 +336,19 @@ mod tests {
             Request::Act {
                 snapshot_id: 17,
                 id: ElementId(3),
-                action: ActionKind::Activate
+                action: Action::Click,
+                to: None,
+                axis: None,
+                amount: None,
             }
         );
         assert!(parse_request(r#"{"cmd":"act","snapshot_id":1,"id":1,"action":"jump"}"#).is_err());
         assert_eq!(
             serde_json::to_value(Response::with(&ActReply {
-                performed: ActionKind::Activate
+                performed: Action::Click
             }))
             .unwrap(),
-            json!({"ok":true,"performed":"activate"})
+            json!({"ok":true,"performed":"click"})
         );
     }
 

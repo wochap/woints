@@ -158,7 +158,8 @@ mod tests {
         let r = run(&tree(), limits()).await;
         let mut ids: Vec<u32> = r.found.iter().map(|f| f.node).collect();
         ids.sort();
-        assert_eq!(ids, [1, 4, 6]);
+        // `document web` (3) is a scroll container.
+        assert_eq!(ids, [1, 3, 4, 6]);
         assert!(!r.truncated);
         assert_eq!(r.visited, 8);
         let entry = r.found.iter().find(|f| f.node == 4).unwrap();
@@ -190,7 +191,7 @@ mod tests {
         l.max_depth = 1;
         let r = run(&tree(), l).await;
         assert!(r.truncated);
-        assert!(r.found.iter().all(|f| f.node == 1));
+        assert!(r.found.iter().all(|f| f.node == 1 || f.node == 3));
     }
 
     #[tokio::test]

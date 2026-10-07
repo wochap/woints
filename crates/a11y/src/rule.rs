@@ -28,6 +28,11 @@ pub mod role {
     pub const ENTRY: u32 = 79;
     pub const LINK: u32 = 88;
     pub const TREE_ITEM: u32 = 91;
+    pub const LIST: u32 = 31;
+    pub const SCROLL_PANE: u32 = 49;
+    pub const TREE: u32 = 65;
+    pub const DOCUMENT_FRAME: u32 = 82;
+    pub const DOCUMENT_WEB: u32 = 95;
 }
 
 /// AT-SPI state numbers (`AtspiStateType`).
@@ -57,6 +62,11 @@ pub const INTERACTIVE_ROLES: &[u32] = &[
     role::SPIN_BUTTON,
     role::SLIDER,
     role::PASSWORD_TEXT,
+    role::SCROLL_PANE,
+    role::LIST,
+    role::TREE,
+    role::DOCUMENT_WEB,
+    role::DOCUMENT_FRAME,
 ];
 
 /// Role names as returned by `GetRoleName`, same set as [`INTERACTIVE_ROLES`].
@@ -77,7 +87,26 @@ pub const INTERACTIVE_ROLE_NAMES: &[&str] = &[
     "spin button",
     "slider",
     "password text",
+    "scroll pane",
+    "list",
+    "tree",
+    "document web",
+    "document frame",
 ];
+
+/// Scroll containers (design D18): collected with the interactive roles,
+/// hinted only by `scroll`.
+pub const SCROLL_CONTAINER_ROLE_NAMES: &[&str] = &[
+    "scroll pane",
+    "list",
+    "tree",
+    "document web",
+    "document frame",
+];
+
+pub fn is_scroll_container(role_name: &str) -> bool {
+    SCROLL_CONTAINER_ROLE_NAMES.contains(&role_name)
+}
 
 /// Roles whose subtrees are page content (design D19).
 pub const WEB_CONTENT_ROLE_NAMES: &[&str] =
@@ -184,13 +213,16 @@ mod tests {
         // SENSITIVE 24, SHOWING 25, VISIBLE 30.
         assert_eq!(r.states, vec![0x4300_0000, 0]);
         assert_eq!(r.states_match, 1);
-        // word0: 7 8 11; word1: 32..62; word2: 79 88 91.
-        let w0: u32 = (1 << 7) | (1 << 8) | (1 << 11);
-        let w1: u32 = [32u32, 35, 37, 40, 43, 44, 45, 51, 52, 62]
+        // word0: 7 8 11 31; word1: 32..62; word2: 65 79 82 88 91 95.
+        let w0: u32 = (1 << 7) | (1 << 8) | (1 << 11) | (1 << 31);
+        let w1: u32 = [32u32, 35, 37, 40, 43, 44, 45, 49, 51, 52, 62]
             .iter()
             .map(|b| 1u32 << (b - 32))
             .sum();
-        let w2: u32 = [79u32, 88, 91].iter().map(|b| 1u32 << (b - 64)).sum();
+        let w2: u32 = [65u32, 79, 82, 88, 91, 95]
+            .iter()
+            .map(|b| 1u32 << (b - 64))
+            .sum();
         assert_eq!(r.roles, vec![w0 as i32, w1 as i32, w2 as i32, 0]);
         assert_eq!(r.roles_match, 2);
         assert!(r.attributes.is_empty() && r.interfaces.is_empty() && !r.invert);
@@ -216,7 +248,10 @@ mod tests {
         assert_eq!(decoded.0, vec![0x4300_0000, 0]);
         assert_eq!(decoded.1, MATCH_ALL);
         assert_eq!(decoded.4.len(), 4);
-        assert_eq!(decoded.4[2], (1 << 15) | (1 << 24) | (1 << 27));
+        assert_eq!(
+            decoded.4[2] as u32,
+            (1 << 1) | (1 << 15) | (1 << 18) | (1 << 24) | (1 << 27) | (1 << 31)
+        );
         assert_eq!(decoded.5, MATCH_ANY);
         assert!(!decoded.8);
     }

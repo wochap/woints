@@ -93,55 +93,101 @@ pub enum ElementSource {
     Quickshell,
 }
 
-/// What can be done to an element. `Activate`, `Focus` and `Pointer` tag
-/// elements during collection; the rest are requested pointer actions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionKind {
-    /// AT-SPI `DoAction`.
-    Activate,
-    /// AT-SPI `GrabFocus` (text entries).
-    Focus,
-    /// Needs a synthetic pointer event (M3).
-    Pointer,
-    Left,
+/// What the user asks to do with an element (design D16–D19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Action {
+    #[default]
+    Click,
     Right,
     Middle,
     Double,
     Hover,
-    Scroll,
+    Focus,
     Drag,
+    Scroll,
+    Copy,
 }
 
-impl ActionKind {
+impl Action {
+    pub const ALL: [Action; 9] = [
+        Action::Click,
+        Action::Right,
+        Action::Middle,
+        Action::Double,
+        Action::Hover,
+        Action::Focus,
+        Action::Drag,
+        Action::Scroll,
+        Action::Copy,
+    ];
+
+    /// Actions any element supports through the pointer alone.
+    pub const POINTER: [Action; 7] = [
+        Action::Click,
+        Action::Right,
+        Action::Middle,
+        Action::Double,
+        Action::Hover,
+        Action::Drag,
+        Action::Scroll,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
-            ActionKind::Activate => "activate",
-            ActionKind::Focus => "focus",
-            ActionKind::Pointer => "pointer",
-            ActionKind::Left => "left",
-            ActionKind::Right => "right",
-            ActionKind::Middle => "middle",
-            ActionKind::Double => "double",
-            ActionKind::Hover => "hover",
-            ActionKind::Scroll => "scroll",
-            ActionKind::Drag => "drag",
+            Action::Click => "click",
+            Action::Right => "right",
+            Action::Middle => "middle",
+            Action::Double => "double",
+            Action::Hover => "hover",
+            Action::Focus => "focus",
+            Action::Drag => "drag",
+            Action::Scroll => "scroll",
+            Action::Copy => "copy",
+        }
+    }
+
+    /// Actions supported by an element with the given AT-SPI capabilities:
+    /// pointer actions always, `focus` and `copy` only through AT-SPI.
+    pub fn supported(caps: &[AtspiCap]) -> Vec<Action> {
+        if caps.is_empty() {
+            Action::POINTER.to_vec()
+        } else {
+            Action::ALL.to_vec()
         }
     }
 }
 
-impl fmt::Display for ActionKind {
+impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl FromStr for ActionKind {
-    type Err = String;
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown action \"{0}\"")]
+pub struct ParseActionError(pub String);
+
+impl FromStr for Action {
+    type Err = ParseActionError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_value(serde_json::Value::String(s.to_owned()))
-            .map_err(|_| format!("unknown action: {s}"))
+        Action::ALL
+            .into_iter()
+            .find(|a| a.as_str() == s)
+            .ok_or_else(|| ParseActionError(s.to_owned()))
     }
+}
+
+/// AT-SPI capabilities of an element, in the order the actuator tries them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtspiCap {
+    /// `Component.GrabFocus` is the natural activation (text entries).
+    GrabFocus,
+    /// `Action.DoAction` with at least one action.
+    DoAction,
+    /// Reachable over AT-SPI, but neither of the above (still focusable, readable).
+    Accessible,
 }
 
 /// One hintable thing on screen, in global logical coordinates.
@@ -152,7 +198,10 @@ pub struct Element {
     pub role: String,
     pub name: String,
     pub source: ElementSource,
-    pub actions: Vec<ActionKind>,
+    pub actions: Vec<Action>,
+    /// AT-SPI capabilities; empty for pointer-only elements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<AtspiCap>,
     pub confidence: f32,
     /// Provider-specific reference used by actuators (AT-SPI: `bus:path`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,6 +220,9 @@ pub struct StageTiming {
 pub struct Timings(pub Vec<StageTiming>);
 
 impl Timings {
+    /// Stage recorded by actuators.
+    pub const ACT: &'static str = "act";
+
     pub fn record(&mut self, stage: &str, d: Duration) {
         let ms = d.as_secs_f64() * 1000.0;
         tracing::debug!(stage = %stage, ms = ms as f32, "stage done");
@@ -213,7 +265,8 @@ mod tests {
             role: "push button".into(),
             name: "OK".into(),
             source: ElementSource::Demo,
-            actions: vec![ActionKind::Activate, ActionKind::Right],
+            actions: vec![Action::Click, Action::Right],
+            caps: vec![],
             confidence: 1.0,
             handle: None,
         };
@@ -238,10 +291,25 @@ mod tests {
 
     #[test]
     fn action_names() {
-        assert_eq!("activate".parse::<ActionKind>(), Ok(ActionKind::Activate));
-        assert_eq!("right".parse::<ActionKind>(), Ok(ActionKind::Right));
-        assert!("jump".parse::<ActionKind>().is_err());
-        assert_eq!(ActionKind::Double.to_string(), "double");
+        assert_eq!("double".parse::<Action>(), Ok(Action::Double));
+        assert_eq!("copy".parse::<Action>(), Ok(Action::Copy));
+        assert_eq!(
+            "jump".parse::<Action>().unwrap_err().to_string(),
+            "unknown action \"jump\""
+        );
+        assert_eq!(Action::default(), Action::Click);
+        for a in Action::ALL {
+            assert_eq!(a.as_str().parse::<Action>(), Ok(a));
+            assert_eq!(serde_json::to_value(a).unwrap(), a.as_str());
+        }
+    }
+
+    #[test]
+    fn supported_actions() {
+        let p = Action::supported(&[]);
+        assert!(!p.contains(&Action::Focus) && !p.contains(&Action::Copy));
+        assert_eq!(p.len(), 7);
+        assert_eq!(Action::supported(&[AtspiCap::DoAction]), Action::ALL);
     }
 
     #[test]

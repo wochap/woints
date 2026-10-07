@@ -9,7 +9,7 @@ use futures::stream;
 use zbus::Connection;
 
 use woints_core::geom::{Global, Rect, Size};
-use woints_core::model::{ActionKind, Element, ElementId, ElementSource, Target, Timings};
+use woints_core::model::{Action, AtspiCap, Element, ElementId, ElementSource, Target, Timings};
 use woints_core::ports::{Budget, CollectReport, Collected, ElementProvider, ProviderError};
 use woints_core::profile::{Strategy, ToolkitProfile, base_filters};
 use woints_core::proto::ProviderStatus;
@@ -491,13 +491,15 @@ impl AtspiProvider {
             .enumerate()
             .map(|(n, i)| {
                 let r = &reads[i];
+                let caps = atspi_caps(&r.role, &r.states, r.n_actions);
                 Element {
                     id: ElementId(n as u32 + 1),
                     rect: cands[i].rect,
                     role: r.role.clone(),
                     name: r.name.clone(),
                     source: ElementSource::Atspi,
-                    actions: action_kinds(&r.role, &r.states, r.n_actions),
+                    actions: Action::supported(&caps),
+                    caps,
                     confidence: 1.0,
                     handle: Some(r.obj.handle()),
                 }
@@ -522,18 +524,18 @@ impl ElementProvider for AtspiProvider {
     }
 }
 
-/// `Activate` when the element has actions, `Focus` (first) for text
-/// entries, `Pointer` when neither applies.
-pub fn action_kinds(role: &str, states: &[u32], n_actions: i32) -> Vec<ActionKind> {
+/// `GrabFocus` (first) for text entries, `DoAction` when the element has
+/// actions, `Accessible` when neither applies.
+pub fn atspi_caps(role: &str, states: &[u32], n_actions: i32) -> Vec<AtspiCap> {
     let mut v = Vec::new();
     if role == "entry" || role == "password text" || has_state(states, state::EDITABLE) {
-        v.push(ActionKind::Focus);
+        v.push(AtspiCap::GrabFocus);
     }
     if n_actions > 0 {
-        v.push(ActionKind::Activate);
+        v.push(AtspiCap::DoAction);
     }
     if v.is_empty() {
-        v.push(ActionKind::Pointer);
+        v.push(AtspiCap::Accessible);
     }
     v
 }
@@ -602,14 +604,16 @@ mod tests {
 
     #[test]
     fn action_tags() {
-        assert_eq!(action_kinds("push button", &[], 1), [ActionKind::Activate]);
-        assert_eq!(
-            action_kinds("entry", &[], 1),
-            [ActionKind::Focus, ActionKind::Activate]
-        );
-        assert_eq!(action_kinds("password text", &[], 0), [ActionKind::Focus]);
+        use AtspiCap::*;
+        assert_eq!(atspi_caps("push button", &[], 1), [DoAction]);
+        assert_eq!(atspi_caps("entry", &[], 1), [GrabFocus, DoAction]);
+        assert_eq!(atspi_caps("password text", &[], 0), [GrabFocus]);
         let editable = [1u32 << state::EDITABLE, 0];
-        assert_eq!(action_kinds("combo box", &editable, 0), [ActionKind::Focus]);
-        assert_eq!(action_kinds("list item", &[], 0), [ActionKind::Pointer]);
+        assert_eq!(atspi_caps("combo box", &editable, 0), [GrabFocus]);
+        assert_eq!(atspi_caps("list item", &[], 0), [Accessible]);
+        assert_eq!(
+            Action::supported(&atspi_caps("push button", &[], 1)),
+            Action::ALL
+        );
     }
 }

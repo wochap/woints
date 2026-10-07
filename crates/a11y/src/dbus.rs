@@ -13,6 +13,8 @@ pub const ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
 pub const APPLICATION: &str = "org.a11y.atspi.Application";
 pub const COMPONENT: &str = "org.a11y.atspi.Component";
 pub const ACTION: &str = "org.a11y.atspi.Action";
+pub const TEXT: &str = "org.a11y.atspi.Text";
+pub const VALUE: &str = "org.a11y.atspi.Value";
 pub const COLLECTION: &str = "org.a11y.atspi.Collection";
 pub const REGISTRY: &str = "org.a11y.atspi.Registry";
 pub const ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
@@ -159,6 +161,22 @@ pub async fn do_action(c: &Connection, o: &Obj, index: i32) -> zbus::Result<bool
 
 pub async fn grab_focus(c: &Connection, o: &Obj) -> zbus::Result<bool> {
     call(c, o, COMPONENT, "GrabFocus", &()).await
+}
+
+/// `Text.GetText(0, -1)`.
+pub async fn text(c: &Connection, o: &Obj) -> zbus::Result<String> {
+    call(c, o, TEXT, "GetText", &(0i32, -1i32)).await
+}
+
+/// `Value` interface: current, minimum, maximum.
+pub async fn value(c: &Connection, o: &Obj) -> zbus::Result<(f64, f64, f64)> {
+    let f = |v: OwnedValue| f64::try_from(v).map_err(zbus::Error::from);
+    let (cur, min, max) = futures::join!(
+        prop(c, o, VALUE, "CurrentValue"),
+        prop(c, o, VALUE, "MinimumValue"),
+        prop(c, o, VALUE, "MaximumValue")
+    );
+    Ok((f(cur?)?, f(min?)?, f(max?)?))
 }
 
 pub async fn get_matches(
