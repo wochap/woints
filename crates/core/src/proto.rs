@@ -198,6 +198,12 @@ pub struct StatusReply {
     pub clipboard: String,
     #[serde(default)]
     pub config: ConfigStatus,
+    /// `classical`, `onnx`, `onnx+classical` or `classical (onnx unavailable)`.
+    #[serde(default)]
+    pub detector: String,
+    /// `loaded <path> ep=<ep>` or `unavailable (<reason>)`; absent when unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onnx: Option<String>,
 }
 
 /// Which config is in effect and what went wrong with the last load.

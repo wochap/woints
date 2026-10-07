@@ -171,6 +171,12 @@ fn print_human(req: &Request, resp: &Response) {
                     if s.overlay { "running" } else { "unavailable" }
                 );
                 println!("pointer   {}", s.pointer);
+                if !s.detector.is_empty() {
+                    println!("detector  {}", s.detector);
+                }
+                if let Some(o) = &s.onnx {
+                    println!("onnx      {o}");
+                }
                 println!("clipboard {}", s.clipboard);
                 for o in &s.outputs {
                     let r = o.rect;

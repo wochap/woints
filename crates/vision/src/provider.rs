@@ -67,13 +67,15 @@ impl<C: FrameCapture + Sync> VisionProvider<C> {
         let params = DetectParams::from_config(&self.config, Some(budget.deadline));
         let detector = self.detector.clone();
         let f = frame.clone();
-        let detections = tokio::task::spawn_blocking(move || {
+        let (detections, sub) = tokio::task::spawn_blocking(move || {
             let mut d = detector.lock().unwrap_or_else(|e| e.into_inner());
-            d.detect(&f, &params)
+            let found = d.detect(&f, &params);
+            (found, d.take_timings())
         })
         .await
         .map_err(|e| ProviderError::Other(format!("detector: {e}")))?;
         timings.record("detect", t.elapsed());
+        timings.0.extend(sub.0);
         let truncated = budget.expired();
         if truncated {
             tracing::warn!("vision_budget_exceeded");
@@ -136,6 +138,7 @@ mod tests {
                 rect_px: Rect::new(20, 10, 40, 20),
                 confidence: 0.9,
                 class: DetectionClass::Image,
+                source: Default::default(),
             }]
         }
     }

@@ -67,12 +67,22 @@ impl DetectionClass {
     }
 }
 
+/// Which detector produced a [`Detection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DetectionSource {
+    #[default]
+    Classical,
+    Onnx,
+}
+
 /// One candidate region found by a detector.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Detection {
     pub rect_px: Rect<FramePx>,
     pub confidence: f32,
     pub class: DetectionClass,
+    pub source: DetectionSource,
 }
 
 /// Whether vision ran for a request and why (`snapshot`, logs, `doctor`).

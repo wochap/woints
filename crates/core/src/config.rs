@@ -57,11 +57,143 @@ pub enum EdgeMode {
     Laplacian,
 }
 
+/// Which detectors run on a captured frame (`vision.detector`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DetectorKind {
+    #[default]
+    #[serde(rename = "classical")]
+    Classical,
+    #[serde(rename = "onnx")]
+    Onnx,
+    /// Both, ONNX first; boxes unioned then IoU-merged with ONNX precedence.
+    #[serde(rename = "onnx+classical")]
+    OnnxClassical,
+}
+
+impl DetectorKind {
+    pub fn uses_onnx(&self) -> bool {
+        matches!(self, DetectorKind::Onnx | DetectorKind::OnnxClassical)
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DetectorKind::Classical => "classical",
+            DetectorKind::Onnx => "onnx",
+            DetectorKind::OnnxClassical => "onnx+classical",
+        }
+    }
+}
+
+/// ONNX Runtime execution provider (`vision.onnx.ep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Ep {
+    #[default]
+    Cpu,
+    Cuda,
+    Migraphx,
+}
+
+impl Ep {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Ep::Cpu => "cpu",
+            Ep::Cuda => "cuda",
+            Ep::Migraphx => "migraphx",
+        }
+    }
+}
+
+/// Model output layout (`vision.onnx.output_format`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    /// From the output count and shapes.
+    #[default]
+    Auto,
+    Yolo,
+    Detr,
+}
+
+/// `pixel * scale`, then `(v - mean[c]) / std[c]`. `scale = 0` and empty
+/// `mean`/`std` defer to model metadata.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Normalization {
+    pub scale: f32,
+    pub mean: Vec<f32>,
+    pub std: Vec<f32>,
+}
+
+/// `[vision.onnx]`. Empty lists and zero values defer to model metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OnnxConfig {
+    pub model_path: String,
+    pub ep: Ep,
+    /// Intra-op threads; 0 = physical cores / 2.
+    pub threads: usize,
+    pub min_confidence: f32,
+    pub nms_iou: f32,
+    /// `[width, height]`.
+    pub input_size: Vec<u32>,
+    pub class_names: Vec<String>,
+    /// Classes kept; empty = all.
+    pub interactive_classes: Vec<String>,
+    pub normalization: Normalization,
+    pub output_format: OutputFormat,
+    /// Letterbox padding grey level.
+    pub pad: u8,
+}
+
+impl Default for OnnxConfig {
+    fn default() -> Self {
+        Self {
+            model_path: String::new(),
+            ep: Ep::Cpu,
+            threads: 0,
+            min_confidence: 0.35,
+            nms_iou: 0.5,
+            input_size: Vec::new(),
+            class_names: Vec::new(),
+            interactive_classes: Vec::new(),
+            normalization: Normalization::default(),
+            output_format: OutputFormat::Auto,
+            pad: 114,
+        }
+    }
+}
+
+impl OnnxConfig {
+    /// `model_path` with a leading `~` expanded to `$HOME`.
+    pub fn model_path(&self) -> PathBuf {
+        expand_tilde(&self.model_path)
+    }
+
+    /// Settings that need a new session when they change.
+    pub fn session_key(&self) -> (String, Ep, usize) {
+        (self.model_path.clone(), self.ep, self.threads)
+    }
+}
+
+/// Expand a leading `~` or `~/` to `$HOME`.
+pub fn expand_tilde(p: &str) -> PathBuf {
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    if p == "~" {
+        return home().unwrap_or_else(|| PathBuf::from(p));
+    }
+    match (p.strip_prefix("~/"), home()) {
+        (Some(rest), Some(h)) => h.join(rest),
+        _ => PathBuf::from(p),
+    }
+}
+
 /// `[vision]` keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VisionConfig {
     pub mode: VisionMode,
+    pub detector: DetectorKind,
+    pub onnx: OnnxConfig,
     pub min_atspi_elements: usize,
     /// Hyprland classes (glob, `*` and `?`) that always get vision.
     pub force_classes: Vec<String>,
@@ -85,6 +217,8 @@ impl Default for VisionConfig {
     fn default() -> Self {
         Self {
             mode: VisionMode::Fallback,
+            detector: DetectorKind::Classical,
+            onnx: OnnxConfig::default(),
             min_atspi_elements: 3,
             force_classes: Vec::new(),
             min_box: 8,
@@ -718,6 +852,52 @@ mod tests {
         assert_eq!(i.default_action, Action::Right);
         assert!(i.restore_cursor);
         assert_eq!(l.config.vision_config().force_classes, ["steam*"]);
+    }
+
+    #[test]
+    fn onnx_defaults() {
+        let l = parse("").unwrap();
+        let v = &l.config.vision;
+        assert_eq!(v.detector, DetectorKind::Classical);
+        assert_eq!(v.onnx.ep, Ep::Cpu);
+        assert_eq!(v.onnx.min_confidence, 0.35);
+        assert_eq!(v.onnx.nms_iou, 0.5);
+        assert_eq!(v.onnx.pad, 114);
+        assert!(v.onnx.input_size.is_empty());
+        assert_eq!(v.onnx.output_format, OutputFormat::Auto);
+    }
+
+    #[test]
+    fn onnx_section() {
+        let l = parse(
+            "[vision]\ndetector = \"onnx+classical\"\n\
+             [vision.onnx]\nmodel_path = \"~/m/ui.onnx\"\nep = \"migraphx\"\nthreads = 4\n\
+             min_confidence = 0.5\ninput_size = [480, 480]\nclass_names = [\"button\", \"icon\"]\n\
+             interactive_classes = [\"button\"]\n\
+             normalization = { scale = 0.00392156, mean = [0,0,0], std = [1,1,1] }\n\
+             output_format = \"detr\"\nsparkle = 1\n",
+        )
+        .unwrap();
+        let v = &l.config.vision;
+        assert_eq!(v.detector, DetectorKind::OnnxClassical);
+        assert!(v.detector.uses_onnx());
+        assert_eq!(v.onnx.ep, Ep::Migraphx);
+        assert_eq!(v.onnx.threads, 4);
+        assert_eq!(v.onnx.input_size, [480, 480]);
+        assert_eq!(v.onnx.class_names, ["button", "icon"]);
+        assert_eq!(v.onnx.normalization.mean, [0.0, 0.0, 0.0]);
+        assert_eq!(v.onnx.output_format, OutputFormat::Detr);
+        assert_eq!(l.warnings, ["vision.onnx.sparkle: unknown key"]);
+        if let Some(h) = std::env::var_os("HOME") {
+            assert_eq!(v.onnx.model_path(), PathBuf::from(h).join("m/ui.onnx"));
+        }
+        assert!(parse("[vision]\ndetector = \"magic\"\n").is_err());
+    }
+
+    #[test]
+    fn tilde() {
+        assert_eq!(expand_tilde("/abs/m.onnx"), PathBuf::from("/abs/m.onnx"));
+        assert_eq!(expand_tilde("rel~/x"), PathBuf::from("rel~/x"));
     }
 
     #[test]

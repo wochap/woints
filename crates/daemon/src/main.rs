@@ -51,6 +51,15 @@ async fn main() -> std::process::ExitCode {
         None => woints_core::config::default_path(),
     };
 
+    #[cfg(feature = "vision")]
+    if let Some(p) = &config_path
+        && let Ok((l, _)) = woints_core::config::load(p)
+        && let Err(e) = woints_vision::check_config(&l.config.vision)
+    {
+        eprintln!("wointsd: {e}");
+        return std::process::ExitCode::from(1);
+    }
+
     let path = socket_path();
     let listener = match server::bind(&path).await {
         Ok(l) => l,

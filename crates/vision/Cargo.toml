@@ -9,6 +9,13 @@ license.workspace = true
 woints-core.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 tracing.workspace = true
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-24"], optional = true }
+
+[features]
+default = []
+onnx = ["dep:ort"]
+cuda = ["onnx", "ort/cuda"]
+migraphx = ["onnx", "ort/migraphx"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }

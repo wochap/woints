@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::geom::{Global, Rect};
+use crate::geom::Rect;
 use crate::model::{Action, Element, ElementId, ElementSource};
 use crate::vision::{Detection, Frame};
 
@@ -46,7 +46,7 @@ pub fn to_elements(detections: &[Detection], frame: &Frame) -> Vec<Element> {
 
 /// `outer` holds at least `threshold` of `inner`'s area and is at most
 /// [`MAX_CONTAINMENT_RATIO`] times larger.
-fn contains(outer: &Rect<Global>, inner: &Rect<Global>, threshold: f32) -> bool {
+fn contains<S>(outer: &Rect<S>, inner: &Rect<S>, threshold: f32) -> bool {
     let ia = inner.area();
     if ia <= 0 {
         return false;
@@ -55,7 +55,8 @@ fn contains(outer: &Rect<Global>, inner: &Rect<Global>, threshold: f32) -> bool 
     covered >= f64::from(threshold) && outer.area() as f64 <= ia as f64 * MAX_CONTAINMENT_RATIO
 }
 
-fn duplicate(v: &Rect<Global>, a: &Rect<Global>, p: &MergeParams) -> bool {
+/// `v` duplicates `a` by IoU or containment.
+pub fn duplicate<S>(v: &Rect<S>, a: &Rect<S>, p: &MergeParams) -> bool {
     v.iou(a) > p.iou_threshold
         || contains(v, a, p.containment_threshold)
         || contains(a, v, p.containment_threshold)
@@ -74,9 +75,30 @@ pub fn merge(atspi: Vec<Element>, vision: Vec<Element>, params: &MergeParams) ->
     out
 }
 
+/// Detector chain merge (design D5 of M6): every `primary` detection, then
+/// `secondary` ones not duplicating any of them.
+pub fn merge_detections(
+    primary: Vec<Detection>,
+    secondary: Vec<Detection>,
+    params: &MergeParams,
+) -> Vec<Detection> {
+    let extra: Vec<Detection> = secondary
+        .into_iter()
+        .filter(|s| {
+            !primary
+                .iter()
+                .any(|p| duplicate(&s.rect_px, &p.rect_px, params))
+        })
+        .collect();
+    let mut out = primary;
+    out.extend(extra);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::Global;
     use crate::vision::DetectionClass;
 
     fn el(r: (i32, i32, i32, i32), source: ElementSource, conf: f32) -> Element {
@@ -108,6 +130,7 @@ mod tests {
             rect_px: Rect::new(r.0, r.1, r.2, r.3),
             confidence: 0.5,
             class: DetectionClass::Link,
+            source: Default::default(),
         }
     }
 

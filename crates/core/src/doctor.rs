@@ -61,10 +61,12 @@ pub struct Report {
     pub quickshell: Vec<Check>,
     pub hyprland: Vec<Check>,
     pub config: Vec<Check>,
+    #[serde(default)]
+    pub onnx: Vec<Check>,
 }
 
 impl Report {
-    pub fn groups(&self) -> [(&'static str, &[Check]); 7] {
+    pub fn groups(&self) -> [(&'static str, &[Check]); 8] {
         [
             ("environment", &self.environment),
             ("a11y bus", &self.a11y),
@@ -73,6 +75,7 @@ impl Report {
             ("quickshell", &self.quickshell),
             ("hyprland", &self.hyprland),
             ("config", &self.config),
+            ("onnx", &self.onnx),
         ]
     }
 
@@ -81,6 +84,34 @@ impl Report {
             .iter()
             .any(|(_, c)| c.iter().any(|c| c.level == Level::Fail))
     }
+}
+
+/// `model license:` line from `<model>.license` or `LICENSE*` beside the
+/// model; absence is a warning.
+pub fn model_license(model: &std::path::Path) -> Check {
+    let dir = model.parent().unwrap_or(std::path::Path::new("."));
+    let mut candidates = vec![model.with_extension("license")];
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        let mut l: Vec<_> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("LICENSE"))
+            })
+            .collect();
+        l.sort();
+        candidates.extend(l);
+    }
+    for c in candidates {
+        if let Ok(text) = std::fs::read_to_string(&c) {
+            let first = text.lines().map(str::trim).find(|l| !l.is_empty());
+            let name = c.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            return Check::ok(format!("model license: {} ({name})", first.unwrap_or("")));
+        }
+    }
+    Check::warn("license: not found (warning)")
 }
 
 /// Environment variables relevant to accessibility, in report order.
@@ -284,5 +315,19 @@ mod tests {
         ] {
             assert!(v.get(k).is_some(), "{k}");
         }
+    }
+
+    #[test]
+    fn license_beside_model() {
+        let dir = std::env::temp_dir().join(format!("woints-lic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = dir.join("ui.onnx");
+        assert_eq!(model_license(&m).level, Level::Warn);
+        std::fs::write(dir.join("LICENSE"), "Apache License\nVersion 2.0\n").unwrap();
+        assert_eq!(
+            model_license(&m).message,
+            "model license: Apache License (LICENSE)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

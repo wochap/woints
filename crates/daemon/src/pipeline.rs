@@ -156,7 +156,11 @@ pub struct Vision {
 
 #[cfg(feature = "vision")]
 impl Vision {
-    pub fn new(link: woints_overlay::CaptureLink, config: &Config) -> Self {
+    pub fn new(
+        link: woints_overlay::CaptureLink,
+        config: &Config,
+        onnx: Option<woints_vision::chain::SharedDetector>,
+    ) -> Self {
         let vision = config.vision_config();
         let capture = woints_vision::CompositeCapture {
             toplevel: woints_overlay::ToplevelExportCapture(link.clone()),
@@ -166,7 +170,11 @@ impl Vision {
         Self {
             provider: woints_vision::VisionProvider::new(
                 capture,
-                Box::new(woints_vision::ClassicalDetector::new()),
+                Box::new(woints_vision::ChainDetector::new(
+                    vision.detector,
+                    onnx,
+                    config.merge,
+                )),
                 vision,
             ),
             merge: config.merge,
@@ -652,7 +660,14 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
         merge_ms += t.elapsed();
     }
     if report.ran {
-        for name in ["capture", "detect"] {
+        for name in [
+            "capture",
+            "detect",
+            "detect.onnx",
+            "detect.onnx.pre",
+            "detect.onnx.run",
+            "detect.onnx.post",
+        ] {
             let ms: f64 = vision_timings
                 .0
                 .iter()

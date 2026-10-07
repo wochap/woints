@@ -32,6 +32,7 @@ impl Daemon {
             quickshell,
             hyprland,
             config: self.config_checks().await,
+            onnx: self.onnx_checks(),
         }
     }
 
@@ -158,6 +159,56 @@ impl Daemon {
             )),
             None => Check::warn("Hyprland version unknown"),
         }]
+    }
+
+    /// ONNX detector section (M6).
+    fn onnx_checks(&self) -> Vec<Check> {
+        #[cfg(feature = "vision")]
+        {
+            if !woints_vision::ONNX_COMPILED {
+                return vec![Check::ok(woints_vision::NOT_COMPILED)];
+            }
+            let v = self.settings().config.vision_config();
+            let mut out = vec![
+                Check::ok("feature: yes"),
+                Check::ok(format!("detector: {}", v.detector.as_str())),
+            ];
+            let slot = self.onnx_slot();
+            match &slot.state {
+                None => out.push(Check::ok(
+                    "model: not used (vision.detector = \"classical\")",
+                )),
+                Some(Err(e)) => {
+                    out.push(Check::fail(format!("model: {e}")));
+                    if v.onnx.model_path.is_empty() {
+                        return out;
+                    }
+                }
+                Some(Ok((_, s))) => {
+                    out.push(Check::ok(format!("model: {} ok", s.path)));
+                    let shape: Vec<String> = s.input_shape.iter().map(i64::to_string).collect();
+                    out.push(Check::ok(format!("input: [{}]", shape.join(","))));
+                    out.push(Check::ok(format!("outputs: {}", s.output_names.join(", "))));
+                    let ep = format!(
+                        "ep: {} (requested {})",
+                        s.ep_active.as_str(),
+                        s.ep_requested.as_str()
+                    );
+                    out.push(if s.ep_active == s.ep_requested {
+                        Check::ok(ep)
+                    } else {
+                        Check::warn(ep)
+                    });
+                    out.push(Check::ok(format!("warmup: {:.0} ms", s.warmup_ms)));
+                }
+            }
+            if slot.state.is_some() {
+                out.push(woints_core::doctor::model_license(&v.onnx.model_path()));
+            }
+            out
+        }
+        #[cfg(not(feature = "vision"))]
+        vec![Check::ok("onnx: not compiled in (built without vision)")]
     }
 
     async fn config_checks(&self) -> Vec<Check> {

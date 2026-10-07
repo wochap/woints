@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cargo:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "woints-vision/onnx"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: build
+        run: nix develop -c cargo build --workspace ${{ matrix.features && format('--features {0}', matrix.features) }}
+      - name: test
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            export ORT_DYLIB_PATH=$(nix build --no-link --print-out-paths nixpkgs#onnxruntime)/lib/libonnxruntime.so
+          fi
+          nix develop -c cargo test --workspace ${{ matrix.features && format('--features {0}', matrix.features) }}
+      - name: clippy
+        run: nix develop -c cargo clippy --workspace --all-targets ${{ matrix.features && format('--features {0}', matrix.features) }} -- -D warnings
+
+  nix-onnx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix build .#woints-onnx -L

@@ -4,13 +4,18 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use woints_core::config::{EdgeMode, VisionConfig};
+use woints_core::config::{EdgeMode, OnnxConfig, VisionConfig};
 use woints_core::geom::Rect;
-use woints_core::vision::{Detection, DetectionClass, Frame, FramePx};
+use woints_core::model::Timings;
+use woints_core::vision::{Detection, DetectionClass, DetectionSource, Frame, FramePx};
 
 /// Turns a frame into candidate boxes in frame pixels (design D16).
 pub trait Detector: Send {
     fn detect(&mut self, frame: &Frame, params: &DetectParams) -> Vec<Detection>;
+    /// Sub-stage timings of the last [`Detector::detect`] (`detect.onnx`, ...).
+    fn take_timings(&mut self) -> Timings {
+        Timings::default()
+    }
 }
 
 /// Detector knobs plus the request deadline.
@@ -25,6 +30,8 @@ pub struct DetectParams {
     pub text_height: i32,
     pub link_hue: bool,
     pub max_elements: usize,
+    /// ONNX thresholds and metadata overrides, read per request.
+    pub onnx: OnnxConfig,
     /// Stages after this instant are skipped; partial results are returned.
     pub deadline: Option<Instant>,
 }
@@ -47,6 +54,7 @@ impl DetectParams {
             text_height: c.text_height,
             link_hue: c.link_hue,
             max_elements: c.max_elements,
+            onnx: c.onnx.clone(),
             deadline,
         }
     }
@@ -553,6 +561,7 @@ impl Detector for ClassicalDetector {
                     rect_px,
                     confidence: conf.min(1.0),
                     class,
+                    source: DetectionSource::Classical,
                 }
             })
             .collect();

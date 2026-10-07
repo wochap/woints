@@ -192,6 +192,9 @@ pub struct Daemon {
     /// Vision over the running overlay's capture link; rebuilt with the overlay.
     #[cfg(feature = "vision")]
     vision: Mutex<Option<Arc<pipeline::Vision>>>,
+    /// ONNX session, kept across reloads unless its model/EP/threads change.
+    #[cfg(feature = "vision")]
+    pub(crate) onnx: std::sync::Mutex<woints_vision::OnnxSlot>,
     actuator: Option<AtspiActuator>,
     shown: Mutex<Option<Shown>>,
     /// Phase 1 of the current session, restored by Escape (drag) or Tab (scroll).
@@ -248,6 +251,12 @@ impl Daemon {
         config_path: Option<PathBuf>,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<OverlayEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
+        #[cfg(feature = "vision")]
+        let onnx = {
+            let mut s = woints_vision::OnnxSlot::default();
+            s.sync(&config.vision_config());
+            s
+        };
         let d = Arc::new(Self {
             started: Instant::now(),
             settings: RwLock::new(Arc::new(Settings::new(config, None))),
@@ -269,6 +278,8 @@ impl Daemon {
             quickshell,
             #[cfg(feature = "vision")]
             vision: Mutex::new(None),
+            #[cfg(feature = "vision")]
+            onnx: std::sync::Mutex::new(onnx),
             actuator,
             shown: Mutex::new(None),
             first: Mutex::new(None),
@@ -276,6 +287,26 @@ impl Daemon {
             shutdown: Notify::new(),
         });
         (d, rx)
+    }
+
+    #[cfg(feature = "vision")]
+    pub(crate) fn onnx_slot(&self) -> std::sync::MutexGuard<'_, woints_vision::OnnxSlot> {
+        self.onnx.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `status` `detector` and `onnx` lines.
+    fn detector_status(&self) -> (String, Option<String>) {
+        let kind = self.settings().config.vision.detector;
+        #[cfg(feature = "vision")]
+        {
+            let s = self.onnx_slot();
+            (
+                woints_vision::ChainDetector::describe(kind, s.detector().is_some()),
+                s.summary(),
+            )
+        }
+        #[cfg(not(feature = "vision"))]
+        (kind.as_str().into(), None)
     }
 
     /// The settings in effect; cheap to clone, stable for one request.
@@ -301,11 +332,20 @@ impl Daemon {
         let theme = new.theme.clone();
         self.set_settings(new);
         #[cfg(feature = "vision")]
-        if let OverlaySlot::Running(h) = &*self.overlay.lock().await {
-            *self.vision.lock().await = Some(Arc::new(pipeline::Vision::new(
-                h.capture_link(),
-                &self.settings().config,
-            )));
+        {
+            let v = self.settings().config.vision_config();
+            let onnx = {
+                let mut slot = self.onnx_slot();
+                slot.sync(&v);
+                slot.detector()
+            };
+            if let OverlaySlot::Running(h) = &*self.overlay.lock().await {
+                *self.vision.lock().await = Some(Arc::new(pipeline::Vision::new(
+                    h.capture_link(),
+                    &self.settings().config,
+                    onnx,
+                )));
+            }
         }
         if self.state().await == State::Idle {
             return;
@@ -333,7 +373,15 @@ impl Daemon {
         let Some(path) = self.config_path.clone() else {
             return Response::err("no config path: neither XDG_CONFIG_HOME nor HOME is set");
         };
-        match cfg::load(&path) {
+        #[allow(unused_mut)]
+        let mut loaded = cfg::load(&path);
+        #[cfg(feature = "vision")]
+        if let Ok((l, _)) = &loaded
+            && let Err(e) = woints_vision::check_config(&l.config.vision)
+        {
+            loaded = Err(vec![e]);
+        }
+        match loaded {
             Ok((l, src)) => {
                 let status = loaded_status(&src, l.warnings);
                 *self.config_status.lock().await = status.clone();
@@ -393,9 +441,11 @@ impl Daemon {
         });
         #[cfg(feature = "vision")]
         {
+            let onnx = self.onnx_slot().detector();
             *self.vision.lock().await = Some(Arc::new(pipeline::Vision::new(
                 handle.capture_link(),
                 &self.settings().config,
+                onnx,
             )));
         }
         *self.overlay.lock().await = OverlaySlot::Running(handle);
@@ -1181,6 +1231,7 @@ impl Daemon {
             _ => None,
         };
         let overlay = caps.is_some();
+        let (detector, onnx) = self.detector_status();
         Response::with(&StatusReply {
             state: self.state().await,
             version: env!("CARGO_PKG_VERSION").into(),
@@ -1198,6 +1249,8 @@ impl Daemon {
                 None => "unavailable".into(),
             },
             config: self.config_status().await,
+            detector,
+            onnx,
         })
     }
 

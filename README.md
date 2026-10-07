@@ -269,6 +269,65 @@ Vision on three surfaces dominates. TODO(verify): the same run with the
 Woints module imported, where `qs.list` replaces vision on the bar (design
 budget 40 ms; a native IPC client is the follow-up if p95 exceeds ~20 ms).
 
+## ONNX detector
+
+Optional learned detector behind the classical one. Off by default; the
+default build carries no ONNX Runtime code.
+
+1. Build with the feature: `nix build .#woints-onnx` (wraps the binaries
+   with `ORT_DYLIB_PATH` pointing at nixpkgs `onnxruntime`), or
+   `cargo build --features woints-vision/onnx` and set `ORT_DYLIB_PATH`
+   yourself.
+2. Put a detector `.onnx` somewhere, ideally with its `LICENSE` next to it.
+3. Configure and `woints reload` (or SIGHUP):
+
+```toml
+[vision]
+detector = "onnx+classical"     # "classical" | "onnx" | "onnx+classical"
+
+[vision.onnx]
+model_path     = "~/.local/share/woints/models/ui.onnx"
+ep             = "cpu"          # "cpu" | "cuda" | "migraphx"
+threads        = 0              # 0 = physical cores / 2
+min_confidence = 0.35
+nms_iou        = 0.5
+# Overrides for models without metadata (Ultralytics `names`/`imgsz`, or
+# `woints.class_names`, `woints.input_size`, `woints.normalization`,
+# `woints.output_format`):
+# input_size          = [640, 640]
+# class_names         = ["button", "icon", "link"]
+# interactive_classes = []      # empty = all
+# normalization       = { scale = 0.00392156, mean = [0,0,0], std = [1,1,1] }
+# output_format       = "auto"  # "auto" | "yolo" | "detr"
+```
+
+`woints doctor` shows the `onnx` section (model, input shape, outputs, EP,
+warm-up, license line); `woints status` shows `detector` and `onnx`. A
+missing or broken model disables ONNX and keeps the classical detector.
+Threshold changes apply on reload without a new session; `model_path`,
+`ep` and `threads` changes rebuild it (`onnx: reloaded`).
+
+**No model is bundled or recommended.** No permissively licensed
+general desktop-GUI detector with clean provenance was found (checked
+2026-10-06). You may run any of these locally; woints never redistributes
+them:
+
+| model | license | source | verdict |
+|---|---|---|---|
+| Ultralytics YOLOv8/11 (code, official weights) | AGPL-3.0 | https://github.com/ultralytics/ultralytics | usable locally by the user, not recommended, not redistributed |
+| microsoft/OmniParser-v2.0 `icon_detect` | AGPL-3.0 | https://huggingface.co/microsoft/OmniParser-v2.0 | usable locally by the user, not recommended, not redistributed |
+| microsoft/OmniParser-v2.0 `icon_caption` (Florence-2) | MIT | https://huggingface.co/microsoft/OmniParser-v2.0 | not a detector (captions, no boxes) |
+| Salesforce/GPA-GUI-Detector | states MIT; derived from AGPL weights | https://huggingface.co/Salesforce/GPA-GUI-Detector | treated as AGPL until clarified; `.pt` only; not recommended |
+| OpenDILabCommunity/webpage_element_detection | Apache-2.0 card; YOLOv8 (AGPL) derivation | https://huggingface.co/OpenDILabCommunity/webpage_element_detection | web pages only; provenance unclear; not recommended |
+| Roboflow RF-DETR (base) | Apache-2.0 | https://github.com/roboflow/rf-detr | permissive, but no GUI finetune exists; candidate for a future own finetune |
+
+Only models whose weights license is compatible with Apache-2.0 will ever
+be recommended here.
+
+Latency, `woints bench -n 20` with the ONNX detector at 640×640 on CPU:
+TODO(verify) on the 7840HS + RTX 4060 laptop and the 5900X + RX 6800 XT
+desktop (`detect.onnx` p50/p95).
+
 ## Toolkit enablement
 
 | toolkit | what to do | status |
@@ -304,6 +363,9 @@ Start with `woints doctor`; each line maps to a fix:
 | `warn qs unavailable` | `qs` not on the daemon's `PATH`; quickshell layers use vision |
 | `fail config error: <key>: ...` | fix the key, then `woints reload` |
 | `warn config: <key>: unknown key` | typo or a key from another version |
+| `ok onnx: not compiled in (...)` | build `.#woints-onnx` to use `vision.detector = "onnx"` |
+| `fail model: class_names missing (set vision.onnx.class_names)` | the model lacks metadata; set the named key |
+| `warn license: not found (warning)` | put the model's `LICENSE` (or `<model>.license`) next to it |
 
 ## Debugging
 
@@ -324,3 +386,7 @@ Badges use **Atkinson Hyperlegible Mono Bold**, © 2020–2024 The Atkinson
 Hyperlegible Mono Project Authors, embedded from
 `crates/overlay/assets/AtkinsonHyperlegibleMono-Bold.ttf` under the SIL Open
 Font License 1.1 (`crates/overlay/assets/OFL.txt`).
+
+## License
+
+Apache-2.0 (`LICENSE`). See `CONTRIBUTING.md` for the prior-art rule.

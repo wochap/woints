@@ -208,6 +208,9 @@ pub struct Element {
     pub handle: Option<String>,
 }
 
+/// Stages under `detect` (`detect.onnx`, `detect.onnx.run`, ...).
+pub const NESTED_STAGE_PREFIX: &str = "detect.";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StageTiming {
     pub stage: String,
@@ -234,8 +237,14 @@ impl Timings {
     pub fn get(&self, stage: &str) -> Option<f64> {
         self.0.iter().find(|s| s.stage == stage).map(|s| s.ms)
     }
+    /// Sum of top-level stages; [`NESTED_STAGE_PREFIX`] sub-spans are already
+    /// inside their parent.
     pub fn total_ms(&self) -> f64 {
-        self.0.iter().map(|s| s.ms).sum()
+        self.0
+            .iter()
+            .filter(|s| !s.stage.starts_with(NESTED_STAGE_PREFIX))
+            .map(|s| s.ms)
+            .sum()
     }
 }
 

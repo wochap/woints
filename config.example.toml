@@ -85,6 +85,14 @@ min_atspi_elements = 3       # fewer usable AT-SPI elements triggers vision
 force_classes      = []      # class globs that always get vision
 budget_ms          = 250
 max_elements       = 150
+detector           = "classical"  # "classical" | "onnx" | "onnx+classical" (onnx needs a woints-onnx build)
+
+[vision.onnx]
+model_path     = ""           # e.g. "~/.local/share/woints/models/ui.onnx"; no model is bundled
+ep             = "cpu"        # "cpu" | "cuda" | "migraphx"
+threads        = 0            # 0 = physical cores / 2
+min_confidence = 0.35
+nms_iou        = 0.5
 
 [merge]
 iou_threshold         = 0.3  # vision box dropped above this IoU with an AT-SPI box
