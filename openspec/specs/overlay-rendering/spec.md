@@ -90,3 +90,14 @@ The overlay thread SHALL answer `hide` with an `Unmapped` message after the dest
 #### Scenario: Hide round trip
 - **WHEN** the daemon sends `hide`
 - **THEN** it receives `Unmapped` after `wl_display.flush` returns for the commit that removed the surfaces
+
+### Requirement: Vision badge style
+Badges for elements with `source = vision` SHALL use a dashed 1 px (device-scaled) border in `hint.vision` with dash pattern `hint.vision_dash` (default `[2, 2]`), unchanged fill and text, and SHALL draw the target outline (dashed, `hint.vision`, radius 2) under the badge even when `hint.outline = false`.
+
+#### Scenario: Mixed sources on one output
+- **WHEN** a snapshot has AT-SPI and vision elements
+- **THEN** AT-SPI badges have a solid `hint.border` stroke and vision badges have a dashed `hint.vision` stroke with an outline on their target rect
+
+#### Scenario: Dash scaled
+- **WHEN** the output scale is 2
+- **THEN** the dash pattern is `[4, 4]` device px

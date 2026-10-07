@@ -79,3 +79,14 @@ The session FSM SHALL add `ShowingSecond { snapshot_id, source: ElementId, typed
 #### Scenario: Status with pointer
 - **WHEN** the virtual pointer manager is bound
 - **THEN** `status.pointer` is the configured backend name
+
+### Requirement: Vision stages timed
+Stage timing SHALL include `capture`, `detect` and `merge` when vision runs, reported in `status.last_timings` and in `woints bench` rows, with the total still reported as one `total` row.
+
+#### Scenario: Bench with vision forced
+- **WHEN** `woints bench -n 20 --scope focused` runs with `vision.mode = always`
+- **THEN** output rows include `capture`, `detect`, `merge` with p50 and p95, and the `total` p95 is reported
+
+#### Scenario: Vision skipped
+- **WHEN** vision did not run for a request
+- **THEN** `last_timings` omits `capture`, `detect`, `merge` rather than reporting zero
