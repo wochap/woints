@@ -1,25 +1,65 @@
 //! Shared daemon state and request handlers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify, mpsc};
 
+use woints_a11y::{A11yConnection, AtspiActuator, AtspiProvider};
 use woints_core::geom::OutputId;
-use woints_core::model::{Scope, Timings};
-use woints_core::ports::{Overlay, OverlayError, OverlayEvent};
-use woints_core::proto::{
-    BenchReply, BenchRow, HintsReply, OutputInfo, Request, Response, SnapshotReply, State,
-    StateReply, StatusReply,
+use woints_core::model::{ActionKind, Element, ElementId, Scope, Target, Timings};
+use woints_core::ports::{
+    ActError, Actuator, Budget, CollectReport, Collected, ElementProvider, KeyPress, Overlay,
+    OverlayError, OverlayEvent, ProviderError, Scene,
 };
-use woints_core::theme::Theme;
+use woints_core::proto::{
+    ActReply, ActionOutcome, BenchReply, BenchRow, HintsReply, OutputInfo, ProviderStatus, Request,
+    Response, SnapshotReply, State, StateReply, StatusReply,
+};
+use woints_core::theme::{Eliminated, Theme};
 use woints_hypr::{Hypr, Monitor};
 use woints_overlay::OverlayHandle;
 use woints_overlay::render::{OutputSurface, Renderer};
 
-use crate::pipeline::{self, HyprState};
+use crate::pipeline::{self, DemoProvider, HyprState};
 use crate::session::{Effect, Input, Session};
 use crate::store::SnapshotStore;
+
+/// Hard cap on the selection flash (design §05).
+const FLASH_CAP_MS: u32 = 120;
+/// How long an action waits for the overlay unmap to commit.
+const UNMAP_TIMEOUT: Duration = Duration::from_millis(500);
+/// xkb `BackSpace`.
+const KEYSYM_BACKSPACE: u32 = 0xff08;
+
+/// The element provider in use: AT-SPI, or the demo boxes with `WOINTS_DEMO=1`.
+pub enum Provider {
+    Demo(DemoProvider),
+    Atspi(AtspiProvider),
+}
+
+impl ElementProvider for Provider {
+    fn name(&self) -> &'static str {
+        match self {
+            Provider::Demo(p) => p.name(),
+            Provider::Atspi(p) => p.name(),
+        }
+    }
+
+    async fn collect(&self, target: &Target, budget: Budget) -> Result<Collected, ProviderError> {
+        match self {
+            Provider::Demo(p) => p.collect(target, budget).await,
+            Provider::Atspi(p) => p.collect(target, budget).await,
+        }
+    }
+}
+
+/// The scene currently on screen, kept so key presses can redraw it.
+struct Shown {
+    scene: Scene,
+    labels: Vec<String>,
+}
 
 /// How long `hints` waits for the overlay to commit.
 const SHOW_TIMEOUT: Duration = Duration::from_secs(2);
@@ -35,7 +75,14 @@ pub struct Daemon {
     session: Mutex<Session>,
     store: Mutex<SnapshotStore>,
     last_timings: Mutex<Timings>,
+    last_collect: Mutex<Vec<CollectReport>>,
+    last_action: Mutex<Option<ActionOutcome>>,
     renderer: Mutex<Renderer>,
+    provider: Provider,
+    actuator: Option<AtspiActuator>,
+    shown: Mutex<Option<Shown>>,
+    /// Keycode → label glyph, learned from the overlay's key reports.
+    keymap: Mutex<HashMap<u32, char>>,
     pub shutdown: Notify,
 }
 
@@ -49,6 +96,23 @@ enum OverlaySlot {
 
 impl Daemon {
     pub fn new(hypr: Option<Hypr>) -> (Arc<Self>, mpsc::UnboundedReceiver<OverlayEvent>) {
+        let (provider, actuator) = if std::env::var("WOINTS_DEMO").as_deref() == Ok("1") {
+            tracing::info!("WOINTS_DEMO=1: using the demo provider");
+            (Provider::Demo(DemoProvider), None)
+        } else {
+            let conn = Arc::new(A11yConnection::new());
+            let p = AtspiProvider::new(conn.clone());
+            let a = AtspiActuator::new(conn, p.apps_cache());
+            (Provider::Atspi(p), Some(a))
+        };
+        Self::with_provider(hypr, provider, actuator)
+    }
+
+    pub fn with_provider(
+        hypr: Option<Hypr>,
+        provider: Provider,
+        actuator: Option<AtspiActuator>,
+    ) -> (Arc<Self>, mpsc::UnboundedReceiver<OverlayEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let d = Arc::new(Self {
             started: Instant::now(),
@@ -61,7 +125,13 @@ impl Daemon {
             session: Mutex::new(Session::Idle),
             store: Mutex::new(SnapshotStore::default()),
             last_timings: Mutex::new(Timings::default()),
+            last_collect: Mutex::new(Vec::new()),
+            last_action: Mutex::new(None),
             renderer: Mutex::new(Renderer::new()),
+            provider,
+            actuator,
+            shown: Mutex::new(None),
+            keymap: Mutex::new(HashMap::new()),
             shutdown: Notify::new(),
         });
         (d, rx)
@@ -101,15 +171,138 @@ impl Daemon {
         }
     }
 
-    /// Feed the session FSM and perform its effect.
+    async fn update_overlay(&self, scene: Scene) {
+        if let OverlaySlot::Running(h) = &*self.overlay.lock().await {
+            if let Err(e) = h.update(scene).await {
+                tracing::warn!("overlay update: {e}");
+            }
+        }
+    }
+
+    async fn hide_overlay_and_wait(&self) {
+        if let OverlaySlot::Running(h) = &*self.overlay.lock().await {
+            match tokio::time::timeout(UNMAP_TIMEOUT, h.hide_and_wait()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!("overlay unmap: {e}"),
+                Err(_) => tracing::warn!("overlay unmap not confirmed in time"),
+            }
+        }
+    }
+
+    fn flash_ms(&self) -> u32 {
+        self.theme.timing.flash_ms.min(FLASH_CAP_MS)
+    }
+
+    /// Feed the session FSM and perform its effects in order.
     pub async fn apply(&self, input: Input) {
         let mut s = self.session.lock().await;
-        let (next, effect) = s.transition(input, Instant::now());
+        let (next, effects) = s.transition(input, Instant::now(), self.flash_ms());
         *s = next;
         drop(s);
-        if effect == Effect::Hide {
-            self.hide_overlay().await;
+        let acting = effects.iter().any(|e| matches!(e, Effect::Act { .. }));
+        for e in effects {
+            match e {
+                Effect::Redraw(f) => {
+                    let scene = {
+                        let shown = self.shown.lock().await;
+                        let Some(sh) = shown.as_ref() else { continue };
+                        let gone: Vec<&str> = f
+                            .eliminated
+                            .iter()
+                            .filter_map(|&i| sh.labels.get(i).map(String::as_str))
+                            .collect();
+                        let fade = self.theme.hint.eliminated == Eliminated::Fade;
+                        pipeline::filter_scene(&sh.scene, &f.typed, &gone, fade, None)
+                    };
+                    self.update_overlay(scene).await;
+                }
+                Effect::Flash(i) => {
+                    let scene = {
+                        let shown = self.shown.lock().await;
+                        let Some(sh) = shown.as_ref() else { continue };
+                        let label = sh.labels.get(i).cloned().unwrap_or_default();
+                        pipeline::filter_scene(&sh.scene, &label, &[], false, Some(&label))
+                    };
+                    self.update_overlay(scene).await;
+                    tokio::time::sleep(Duration::from_millis(u64::from(self.flash_ms()))).await;
+                }
+                Effect::Hide => {
+                    *self.shown.lock().await = None;
+                    if acting {
+                        self.hide_overlay_and_wait().await;
+                    } else {
+                        self.hide_overlay().await;
+                    }
+                }
+                Effect::Act {
+                    snapshot_id,
+                    index,
+                    action,
+                } => {
+                    let element = self
+                        .store
+                        .lock()
+                        .await
+                        .get(snapshot_id)
+                        .and_then(|s| s.elements.get(index).cloned());
+                    match element {
+                        Some(e) => {
+                            let _ = self.act_on(&e, action).await;
+                        }
+                        None => tracing::warn!(snapshot_id, index, "selected element vanished"),
+                    }
+                }
+            }
         }
+    }
+
+    /// Map an overlay key press to a session input. Glyphs are learned per
+    /// keycode, so the glyph shown and the key pressed agree under any layout.
+    pub async fn key_input(&self, k: &KeyPress) -> Option<Input> {
+        if k.keysym == KEYSYM_BACKSPACE {
+            return Some(Input::Backspace);
+        }
+        if k.mods.ctrl || k.mods.alt || k.mods.logo {
+            return None;
+        }
+        let mut map = self.keymap.lock().await;
+        let typed = k
+            .utf8
+            .as_deref()
+            .and_then(|s| s.chars().next())
+            .map(|c| c.to_lowercase().next().unwrap_or(c))
+            .filter(|c| self.theme.hint.alphabet.contains(*c));
+        if let Some(c) = typed {
+            map.insert(k.keycode, c);
+            return Some(Input::Glyph(c));
+        }
+        map.get(&k.keycode).copied().map(Input::Glyph)
+    }
+
+    /// Run the actuator chain on `e`, recording `status.last_action` and the `act` stage.
+    pub async fn act_on(&self, e: &Element, action: ActionKind) -> Result<(), ActError> {
+        let t = Instant::now();
+        let r = match &self.actuator {
+            Some(a) => a.act(e, action).await,
+            None => Err(ActError::NeedsPointer(action)),
+        };
+        let elapsed = t.elapsed();
+        match &r {
+            Ok(()) => tracing::info!(element = e.id.0, %action, name = %e.name, "acted"),
+            Err(ActError::NeedsPointer(a)) => tracing::info!("no actuator for {a}"),
+            Err(err) => tracing::warn!(element = e.id.0, %action, "{err}"),
+        }
+        *self.last_action.lock().await = Some(ActionOutcome {
+            element: e.id,
+            action,
+            ok: r.is_ok(),
+            error: r.as_ref().err().map(ToString::to_string),
+            ms: elapsed.as_secs_f64() * 1000.0,
+        });
+        let mut lt = self.last_timings.lock().await;
+        lt.0.retain(|s| s.stage != "act");
+        lt.record("act", elapsed);
+        r
     }
 
     pub async fn state(&self) -> State {
@@ -163,14 +356,19 @@ impl Daemon {
     async fn pipeline(&self, scope: Scope) -> Result<pipeline::Output, String> {
         let mut timings = Timings::default();
         let h = self.query(&mut timings).await?;
-        pipeline::run(h, scope, &self.theme, timings)
+        let out = pipeline::run(h, scope, &self.theme, timings, &self.provider)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        *self.last_collect.lock().await = out.reports.clone();
+        Ok(out)
     }
 
     pub async fn handle(&self, req: Request) -> Response {
         match req {
-            Request::Hints { scope, action: _ } => self.hints(scope).await,
+            Request::Hints { scope, action } => {
+                self.hints(scope, action.unwrap_or(ActionKind::Activate))
+                    .await
+            }
             Request::Cancel => {
                 self.apply(Input::Cancel).await;
                 Response::with(&StateReply { state: State::Idle })
@@ -183,15 +381,45 @@ impl Daemon {
             }
             Request::Snapshot { scope } => self.snapshot(scope).await,
             Request::Bench { iterations, scope } => self.bench(iterations, scope).await,
+            Request::Act {
+                snapshot_id,
+                id,
+                action,
+            } => self.act(snapshot_id, id, action).await,
         }
     }
 
-    async fn hints(&self, scope: Scope) -> Response {
+    async fn act(&self, snapshot_id: u64, id: ElementId, action: ActionKind) -> Response {
+        let element = {
+            let store = self.store.lock().await;
+            let Some(s) = store.get(snapshot_id) else {
+                return Response::err(format!("unknown snapshot {snapshot_id}"));
+            };
+            match s.elements.iter().find(|e| e.id == id) {
+                Some(e) => e.clone(),
+                None => {
+                    return Response::err(format!(
+                        "unknown element {} in snapshot {snapshot_id}",
+                        id.0
+                    ));
+                }
+            }
+        };
+        match self.act_on(&element, action).await {
+            Ok(()) => Response::with(&ActReply { performed: action }),
+            Err(e) => Response::err(e.to_string()),
+        }
+    }
+
+    async fn hints(&self, scope: Scope, action: ActionKind) -> Response {
         self.apply(Input::HintsRequested).await;
         let mut out = match self.pipeline(scope).await {
             Ok(o) => o,
             Err(e) => return Response::err(e),
         };
+        if let Some(c) = out.scene.chip.as_mut() {
+            c.mode = action.to_string();
+        }
         if out.targets.is_empty() {
             return Response::with(&HintsReply {
                 state: State::Idle,
@@ -240,9 +468,18 @@ impl Daemon {
 
         let n_targets = out.targets.len();
         let n_elements = out.elements.len();
-        let id = self.store.lock().await.insert(out.targets, out.elements);
+        let id = self.store.lock().await.insert(out.elements);
         *self.last_timings.lock().await = out.timings;
-        self.apply(Input::Shown { snapshot_id: id }).await;
+        *self.shown.lock().await = Some(Shown {
+            scene: out.scene,
+            labels: out.labels.clone(),
+        });
+        self.apply(Input::Shown {
+            snapshot_id: id,
+            labels: out.labels,
+            action,
+        })
+        .await;
         Response::with(&HintsReply {
             state: State::Showing,
             targets: Some(n_targets),
@@ -253,11 +490,7 @@ impl Daemon {
     async fn snapshot(&self, scope: Scope) -> Response {
         match self.pipeline(scope).await {
             Ok(o) => {
-                let id = self
-                    .store
-                    .lock()
-                    .await
-                    .insert(o.targets.clone(), o.elements.clone());
+                let id = self.store.lock().await.insert(o.elements.clone());
                 Response::with(&SnapshotReply {
                     snapshot_id: id,
                     targets: o.targets,
@@ -292,7 +525,21 @@ impl Daemon {
             hyprland_version: self.hyprland_version().await,
             overlay,
             last_timings: self.last_timings.lock().await.clone(),
+            providers: vec![self.provider_status()],
+            last_collect: self.last_collect.lock().await.clone(),
+            last_action: self.last_action.lock().await.clone(),
         })
+    }
+
+    fn provider_status(&self) -> ProviderStatus {
+        match &self.provider {
+            Provider::Atspi(p) => p.status(),
+            Provider::Demo(_) => ProviderStatus {
+                name: "demo".into(),
+                available: true,
+                last_error: None,
+            },
+        }
     }
 
     /// Snapshot + headless render, `iterations` times; never maps a surface.
@@ -401,7 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_works_without_hyprland_or_overlay() {
-        let (d, _rx) = Daemon::new(None);
+        let d = demo();
         let r = d.handle(Request::Status).await;
         assert!(r.ok);
         let s: StatusReply = r.payload().unwrap();
@@ -409,9 +656,111 @@ mod tests {
         assert!(!s.overlay);
     }
 
+    fn demo() -> Arc<Daemon> {
+        Daemon::with_provider(None, Provider::Demo(DemoProvider), None).0
+    }
+
+    fn element(id: u32) -> Element {
+        Element {
+            id: ElementId(id),
+            rect: woints_core::geom::Rect::new(0, 0, 10, 10),
+            role: "push button".into(),
+            name: "OK".into(),
+            source: woints_core::model::ElementSource::Demo,
+            actions: vec![ActionKind::Pointer],
+            confidence: 1.0,
+            handle: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn act_unknown_snapshot_and_element() {
+        let d = demo();
+        let r = d
+            .handle(Request::Act {
+                snapshot_id: 17,
+                id: ElementId(3),
+                action: ActionKind::Activate,
+            })
+            .await;
+        assert_eq!(r.error.as_deref(), Some("unknown snapshot 17"));
+        let id = d.store.lock().await.insert(vec![element(1)]);
+        let r = d
+            .handle(Request::Act {
+                snapshot_id: id,
+                id: ElementId(3),
+                action: ActionKind::Activate,
+            })
+            .await;
+        assert!(!r.ok);
+    }
+
+    #[tokio::test]
+    async fn needs_pointer_returns_to_idle() {
+        let d = demo();
+        let id = d.store.lock().await.insert(vec![element(1), element(2)]);
+        d.apply(Input::Shown {
+            snapshot_id: id,
+            labels: vec!["a".into(), "s".into()],
+            action: ActionKind::Right,
+        })
+        .await;
+        assert_eq!(d.state().await, State::Showing);
+        d.apply(Input::Glyph('s')).await;
+        assert_eq!(d.state().await, State::Idle);
+        let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
+        let a = s.last_action.unwrap();
+        assert_eq!(
+            (a.element, a.action, a.ok),
+            (ElementId(2), ActionKind::Right, false)
+        );
+        assert_eq!(a.error.as_deref(), Some("no actuator for right"));
+        assert!(s.last_timings.get("act").is_some());
+        assert_eq!(s.providers[0].name, "demo");
+    }
+
+    #[tokio::test]
+    async fn act_over_socket_reports_needs_pointer() {
+        let d = demo();
+        let id = d.store.lock().await.insert(vec![element(1)]);
+        let r = d
+            .handle(Request::Act {
+                snapshot_id: id,
+                id: ElementId(1),
+                action: ActionKind::Activate,
+            })
+            .await;
+        assert_eq!(r.error.as_deref(), Some("no actuator for activate"));
+    }
+
+    #[tokio::test]
+    async fn key_mapping() {
+        let d = demo();
+        let key = |keycode, utf8: Option<&str>, keysym| KeyPress {
+            keycode,
+            keysym,
+            utf8: utf8.map(String::from),
+            mods: Default::default(),
+        };
+        assert_eq!(
+            d.key_input(&key(22, None, 0xff08)).await,
+            Some(Input::Backspace)
+        );
+        assert_eq!(
+            d.key_input(&key(38, Some("a"), 0x61)).await,
+            Some(Input::Glyph('a'))
+        );
+        // Same keycode with Shift held still maps to the learned glyph.
+        assert_eq!(
+            d.key_input(&key(38, Some("A"), 0x41)).await,
+            Some(Input::Glyph('a'))
+        );
+        assert_eq!(d.key_input(&key(24, Some("q"), 0x71)).await, None);
+    }
+
     #[tokio::test]
     async fn status_works_with_dead_overlay() {
-        let (d, _rx) = Daemon::new(None);
+        let d = demo();
         d.overlay_gone("test").await;
         assert!(matches!(&*d.overlay.lock().await, OverlaySlot::Dead));
         let r = d.handle(Request::Status).await;

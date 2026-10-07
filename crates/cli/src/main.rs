@@ -8,8 +8,10 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
-use woints_core::model::Scope;
-use woints_core::proto::{BenchReply, Request, Response, SnapshotReply, StatusReply, socket_path};
+use woints_core::model::{ActionKind, ElementId, Scope};
+use woints_core::proto::{
+    ActReply, BenchReply, Request, Response, SnapshotReply, StatusReply, socket_path,
+};
 
 #[derive(Parser)]
 #[command(name = "woints", version, about = "Keyboard hints for Hyprland")]
@@ -27,8 +29,9 @@ enum Cmd {
     Hints {
         #[arg(long, default_value = "focused")]
         scope: Scope,
+        /// activate | focus | left | right | middle | double | hover
         #[arg(long)]
-        action: Option<String>,
+        action: Option<ActionKind>,
     },
     /// Hide hints.
     Cancel,
@@ -40,6 +43,16 @@ enum Cmd {
     Snapshot {
         #[arg(long, default_value = "focused")]
         scope: Scope,
+    },
+    /// Act on an element of a snapshot without showing the overlay.
+    Act {
+        #[arg(long)]
+        snapshot: u64,
+        #[arg(long)]
+        id: u32,
+        /// activate | focus | left | right | middle | double | hover
+        #[arg(long, default_value = "activate")]
+        action: ActionKind,
     },
     /// Run the pipeline N times (no overlay) and print p50/p95 per stage.
     Bench {
@@ -59,6 +72,18 @@ fn main() -> ExitCode {
         Cmd::Quit => (Request::Quit, 5),
         Cmd::Snapshot { scope } => (Request::Snapshot { scope }, 5),
         Cmd::Bench { iterations, scope } => (Request::Bench { iterations, scope }, 300),
+        Cmd::Act {
+            snapshot,
+            id,
+            action,
+        } => (
+            Request::Act {
+                snapshot_id: snapshot,
+                id: ElementId(id),
+                action,
+            },
+            10,
+        ),
     };
     let path = socket_path();
     let Ok(mut stream) = UnixStream::connect(&path) else {
@@ -116,12 +141,50 @@ fn print_human(req: &Request, resp: &Response) {
                         o.name, r.w, r.h, r.x, r.y, o.scale
                     );
                 }
+                for p in &s.providers {
+                    let state = if p.available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    };
+                    match &p.last_error {
+                        Some(e) => println!("provider  {}: {state} ({e})", p.name),
+                        None => println!("provider  {}: {state}", p.name),
+                    }
+                }
+                for r in &s.last_collect {
+                    println!(
+                        "collect   {} paired: {} used: {} truncated: {}{}",
+                        r.provider,
+                        r.paired.as_deref().unwrap_or("-"),
+                        r.used.as_deref().unwrap_or("-"),
+                        r.truncated,
+                        if r.reasons.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", r.reasons.join(", "))
+                        }
+                    );
+                }
+                if let Some(a) = &s.last_action {
+                    println!(
+                        "action    {} on {}: {} ({:.1} ms)",
+                        a.action,
+                        a.element.0,
+                        if a.ok {
+                            "ok"
+                        } else {
+                            a.error.as_deref().unwrap_or("failed")
+                        },
+                        a.ms
+                    );
+                }
                 if !s.last_timings.0.is_empty() {
                     println!("last hints:");
                     for t in &s.last_timings.0 {
-                        println!("  {:<11} {:>8.3} ms", t.stage, t.ms);
+                        println!("  {:<16} {:>8.3} ms", t.stage, t.ms);
                     }
-                    println!("  {:<11} {:>8.3} ms", "total", s.last_timings.total_ms());
+                    println!("  {:<16} {:>8.3} ms", "total", s.last_timings.total_ms());
                 }
             }
             Err(_) => println!("{}", Value::Object(resp.payload.clone())),
@@ -129,9 +192,9 @@ fn print_human(req: &Request, resp: &Response) {
         Request::Bench { .. } => match resp.payload::<BenchReply>() {
             Ok(b) => {
                 println!("{} iterations", b.iterations);
-                println!("{:<12} {:>9} {:>9}", "stage", "p50 ms", "p95 ms");
+                println!("{:<16} {:>9} {:>9}", "stage", "p50 ms", "p95 ms");
                 for r in &b.rows {
-                    println!("{:<12} {:>9.3} {:>9.3}", r.stage, r.p50_ms, r.p95_ms);
+                    println!("{:<16} {:>9.3} {:>9.3}", r.stage, r.p50_ms, r.p95_ms);
                 }
             }
             Err(_) => println!("{}", Value::Object(resp.payload.clone())),
@@ -146,6 +209,10 @@ fn print_human(req: &Request, resp: &Response) {
                 );
             }
         }
+        Request::Act { .. } => match resp.payload::<ActReply>() {
+            Ok(a) => println!("performed {}", a.performed),
+            Err(_) => println!("ok"),
+        },
         _ => {
             let parts: Vec<String> = resp
                 .payload

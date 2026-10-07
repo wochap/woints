@@ -93,17 +93,55 @@ pub enum ElementSource {
     Quickshell,
 }
 
+/// What can be done to an element. `Activate`, `Focus` and `Pointer` tag
+/// elements during collection; the rest are requested pointer actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
-    Click,
-    RightClick,
-    MiddleClick,
-    DoubleClick,
+    /// AT-SPI `DoAction`.
+    Activate,
+    /// AT-SPI `GrabFocus` (text entries).
     Focus,
+    /// Needs a synthetic pointer event (M3).
+    Pointer,
+    Left,
+    Right,
+    Middle,
+    Double,
     Hover,
     Scroll,
     Drag,
+}
+
+impl ActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActionKind::Activate => "activate",
+            ActionKind::Focus => "focus",
+            ActionKind::Pointer => "pointer",
+            ActionKind::Left => "left",
+            ActionKind::Right => "right",
+            ActionKind::Middle => "middle",
+            ActionKind::Double => "double",
+            ActionKind::Hover => "hover",
+            ActionKind::Scroll => "scroll",
+            ActionKind::Drag => "drag",
+        }
+    }
+}
+
+impl fmt::Display for ActionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ActionKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_value(serde_json::Value::String(s.to_owned()))
+            .map_err(|_| format!("unknown action: {s}"))
+    }
 }
 
 /// One hintable thing on screen, in global logical coordinates.
@@ -116,6 +154,9 @@ pub struct Element {
     pub source: ElementSource,
     pub actions: Vec<ActionKind>,
     pub confidence: f32,
+    /// Provider-specific reference used by actuators (AT-SPI: `bus:path`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,8 +213,9 @@ mod tests {
             role: "push button".into(),
             name: "OK".into(),
             source: ElementSource::Demo,
-            actions: vec![ActionKind::Click, ActionKind::RightClick],
+            actions: vec![ActionKind::Activate, ActionKind::Right],
             confidence: 1.0,
+            handle: None,
         };
         let v: serde_json::Value = serde_json::to_value(&e).unwrap();
         let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
@@ -192,6 +234,14 @@ mod tests {
         );
         let back: Element = serde_json::from_value(v).unwrap();
         assert_eq!(back, e);
+    }
+
+    #[test]
+    fn action_names() {
+        assert_eq!("activate".parse::<ActionKind>(), Ok(ActionKind::Activate));
+        assert_eq!("right".parse::<ActionKind>(), Ok(ActionKind::Right));
+        assert!("jump".parse::<ActionKind>().is_err());
+        assert_eq!(ActionKind::Double.to_string(), "double");
     }
 
     #[test]

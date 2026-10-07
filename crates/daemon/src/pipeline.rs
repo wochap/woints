@@ -1,11 +1,7 @@
 //! One pass: `hypr.query → select → collect → label → place → render → commit`.
 
-use std::future::poll_fn;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use futures_core::Stream;
 use tracing::Instrument;
 
 use woints_core::geom::{
@@ -15,17 +11,26 @@ use woints_core::geom::{
 use woints_core::labels::{PriorityItem, assign, labels, priority};
 use woints_core::model::{ActionKind, Element, ElementId, ElementSource, Scope, Target, Timings};
 use woints_core::place::{PlaceInput, badge_size, place};
-use woints_core::ports::{Badge, Budget, Chip, ElementProvider, ElementStream, Scene, SelectError};
+use woints_core::ports::{
+    Badge, BadgeStyle, Budget, Chip, CollectReport, Collected, ElementProvider, ProviderError,
+    Scene, SelectError,
+};
 use woints_core::theme::Theme;
 use woints_hypr::{Client, focused_target};
+
+/// Time one provider may spend on one target (design D17).
+pub const PROVIDER_BUDGET: Duration = Duration::from_millis(60);
 
 /// Everything a run produces.
 #[derive(Debug, Clone)]
 pub struct Output {
     pub targets: Vec<Target>,
     pub elements: Vec<Element>,
+    /// Label per element index (empty when the element got none).
+    pub labels: Vec<String>,
     pub scene: Scene,
     pub timings: Timings,
+    pub reports: Vec<CollectReport>,
 }
 
 /// Inputs gathered by the `hypr.query` stage.
@@ -35,20 +40,7 @@ pub struct HyprState {
     pub active: Option<Client>,
 }
 
-struct IterStream<I>(I);
-
-impl<I: Iterator + Unpin> Stream for IterStream<I> {
-    type Item = I::Item;
-    fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<I::Item>> {
-        Poll::Ready(self.0.next())
-    }
-}
-
-async fn next<S: Stream + ?Sized>(s: &mut Pin<Box<S>>) -> Option<S::Item> {
-    poll_fn(|cx| s.as_mut().poll_next(cx)).await
-}
-
-/// M1 demo provider: five boxes at the focused window's corners and centre.
+/// Demo provider: five boxes at the focused window's corners and centre.
 pub struct DemoProvider;
 
 pub const DEMO_BOX: (i32, i32) = (64, 28);
@@ -74,7 +66,7 @@ impl ElementProvider for DemoProvider {
         "demo"
     }
 
-    fn collect<'a>(&'a self, target: &'a Target, _budget: Budget) -> ElementStream<'a> {
+    async fn collect(&self, target: &Target, _budget: Budget) -> Result<Collected, ProviderError> {
         let win = WindowGeom {
             origin: target.rect.origin(),
         };
@@ -95,11 +87,19 @@ impl ElementProvider for DemoProvider {
                 role: "demo".into(),
                 name: name.into(),
                 source: ElementSource::Demo,
-                actions: vec![ActionKind::Click],
+                actions: vec![ActionKind::Pointer],
                 confidence: 1.0,
+                handle: None,
             })
             .collect();
-        Box::pin(IterStream(items.into_iter()))
+        Ok(Collected {
+            elements: items,
+            report: CollectReport {
+                provider: "demo".into(),
+                ..Default::default()
+            },
+            timings: Timings::default(),
+        })
     }
 }
 
@@ -117,7 +117,7 @@ pub fn build_scene(
     scope: Scope,
     theme: &Theme,
     timings: &mut Timings,
-) -> Scene {
+) -> (Scene, Vec<String>) {
     // label
     let t = Instant::now();
     let alphabet: Vec<char> = theme.hint.alphabet.chars().collect();
@@ -167,6 +167,8 @@ pub fn build_scene(
                 label: label_strs[idx[k]].clone(),
                 rect: output_to_global(p.rect, out),
                 output: out.id.clone(),
+                matched: 0,
+                style: BadgeStyle::Normal,
             });
         }
     }
@@ -176,7 +178,7 @@ pub fn build_scene(
         .first()
         .map(|t| t.output.clone())
         .or_else(|| focused_output.cloned());
-    Scene {
+    let scene = Scene {
         outputs: outputs.to_vec(),
         badges,
         chip: chip_output.map(|output| Chip {
@@ -186,16 +188,56 @@ pub fn build_scene(
             output,
         }),
         theme: theme.clone(),
+    };
+    (scene, label_strs)
+}
+
+/// Redraw `base` for the typed buffer: matching badges keep their matched
+/// prefix, `eliminated` ones fade (when `fade`) or disappear, and `flash`
+/// marks the selected label.
+pub fn filter_scene(
+    base: &Scene,
+    typed: &str,
+    eliminated: &[&str],
+    fade: bool,
+    flash: Option<&str>,
+) -> Scene {
+    let mut scene = base.clone();
+    let n = typed.chars().count();
+    scene.badges = base
+        .badges
+        .iter()
+        .filter_map(|b| {
+            let mut b = b.clone();
+            if flash == Some(b.label.as_str()) {
+                b.style = BadgeStyle::Flash;
+                b.matched = b.label.chars().count();
+            } else if flash.is_some() {
+                return None;
+            } else if b.label.starts_with(typed) {
+                b.matched = n;
+            } else if fade && eliminated.contains(&b.label.as_str()) {
+                b.style = BadgeStyle::Faded;
+            } else {
+                return None;
+            }
+            Some(b)
+        })
+        .collect();
+    if let Some(c) = scene.chip.as_mut() {
+        c.typed = typed.to_owned();
     }
+    scene
 }
 
 /// Run select → collect → label → place on already queried Hyprland state.
 /// `render`/`commit` are the caller's (they need the overlay or a renderer).
-pub async fn run(
+pub async fn run<P: ElementProvider + Sync>(
     hypr: HyprState,
     scope: Scope,
     theme: &Theme,
     mut timings: Timings,
+    provider: &P,
 ) -> Result<Output, SelectError> {
     // select
     let t = Instant::now();
@@ -209,29 +251,48 @@ pub async fn run(
         .collect();
     stage(&mut timings, "select", t, ());
 
-    // collect
+    // collect: the provider's own `collect.*` stages, or one `collect` stage.
     let t = Instant::now();
-    let provider = DemoProvider;
     let mut elements = Vec::new();
+    let mut reports = Vec::new();
+    let mut sub = Timings::default();
     for target in &targets {
         let budget = Budget {
-            deadline: Instant::now() + Duration::from_millis(80),
+            deadline: Instant::now() + PROVIDER_BUDGET,
         };
-        let mut s = provider.collect(target, budget);
-        while let Some(e) = next(&mut s)
+        match provider
+            .collect(target, budget)
             .instrument(tracing::debug_span!("collect", provider = provider.name()))
             .await
         {
-            if Instant::now() > budget.deadline {
-                tracing::warn!(provider = provider.name(), "budget exceeded; truncating");
-                break;
+            Ok(c) => {
+                if c.report.truncated {
+                    tracing::warn!(provider = provider.name(), "budget exceeded; truncated");
+                }
+                elements.extend(c.elements);
+                reports.push(c.report);
+                sub.0.extend(c.timings.0);
             }
-            elements.push(e);
+            Err(e) => {
+                tracing::warn!(provider = provider.name(), "{e}");
+                reports.push(CollectReport {
+                    provider: provider.name().into(),
+                    reasons: vec![e.to_string()],
+                    ..Default::default()
+                });
+            }
         }
     }
-    stage(&mut timings, "collect", t, ());
+    for (n, e) in elements.iter_mut().enumerate() {
+        e.id = ElementId(n as u32 + 1);
+    }
+    if sub.0.is_empty() {
+        stage(&mut timings, "collect", t, ());
+    } else {
+        timings.0.extend(sub.0);
+    }
 
-    let scene = build_scene(
+    let (scene, labels) = build_scene(
         &elements,
         &targets,
         &hypr.outputs,
@@ -243,8 +304,10 @@ pub async fn run(
     Ok(Output {
         targets,
         elements,
+        labels,
         scene,
         timings,
+        reports,
     })
 }
 
@@ -288,9 +351,15 @@ mod tests {
             focused_output: Some(OutputId("B".into())),
             active: Some(win),
         };
-        run(h, Scope::Focused, &Theme::default(), Timings::default())
-            .await
-            .unwrap()
+        run(
+            h,
+            Scope::Focused,
+            &Theme::default(),
+            Timings::default(),
+            &DemoProvider,
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
@@ -332,15 +401,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filter_scene_styles() {
+        let o = run_on(window(-1500, 100)).await;
+        let f = filter_scene(&o.scene, "d", &["a", "s"], false, None);
+        assert_eq!(f.badges.len(), 1);
+        assert_eq!((f.badges[0].label.as_str(), f.badges[0].matched), ("d", 1));
+        assert_eq!(f.chip.unwrap().typed, "d");
+        let faded = filter_scene(&o.scene, "d", &["a", "s"], true, None);
+        assert_eq!(faded.badges.len(), 3);
+        assert_eq!(
+            faded
+                .badges
+                .iter()
+                .filter(|b| b.style == BadgeStyle::Faded)
+                .count(),
+            2
+        );
+        let flash = filter_scene(&o.scene, "", &[], false, Some("g"));
+        assert_eq!(flash.badges.len(), 1);
+        assert_eq!(flash.badges[0].style, BadgeStyle::Flash);
+    }
+
+    #[tokio::test]
     async fn no_focused_window() {
         let h = HyprState {
             outputs: outputs(),
             focused_output: None,
             active: None,
         };
-        let o = run(h, Scope::Focused, &Theme::default(), Timings::default())
-            .await
-            .unwrap();
+        let o = run(
+            h,
+            Scope::Focused,
+            &Theme::default(),
+            Timings::default(),
+            &DemoProvider,
+        )
+        .await
+        .unwrap();
         assert!(o.targets.is_empty() && o.elements.is_empty() && o.scene.badges.is_empty());
     }
 
@@ -352,9 +449,15 @@ mod tests {
             active: None,
         };
         assert_eq!(
-            run(h, Scope::All, &Theme::default(), Timings::default())
-                .await
-                .unwrap_err(),
+            run(
+                h,
+                Scope::All,
+                &Theme::default(),
+                Timings::default(),
+                &DemoProvider
+            )
+            .await
+            .unwrap_err(),
             SelectError::Unsupported(Scope::All)
         );
     }

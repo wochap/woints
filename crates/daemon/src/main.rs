@@ -4,8 +4,6 @@ mod daemon;
 mod pipeline;
 mod server;
 mod session;
-// Snapshot lookups are consumed by `act` in M2.
-#[allow(dead_code)]
 mod store;
 
 use std::sync::Arc;
@@ -92,8 +90,8 @@ async fn overlay_events(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<Ove
             OverlayEvent::Escaped => daemon.apply(Input::Escape).await,
             OverlayEvent::Key(k) => {
                 tracing::debug!(keycode = k.keycode, keysym = k.keysym, utf8 = ?k.utf8, "key");
-                if let Some(s) = k.utf8.filter(|s| !s.chars().any(char::is_control)) {
-                    daemon.apply(Input::Typed(s)).await;
+                if let Some(input) = daemon.key_input(&k).await {
+                    daemon.apply(input).await;
                 }
             }
             OverlayEvent::Gone(reason) => daemon.overlay_gone(&reason).await,

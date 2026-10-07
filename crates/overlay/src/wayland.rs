@@ -34,7 +34,7 @@ use tokio::sync::{mpsc, oneshot};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_callback, wl_display, wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
@@ -52,8 +52,13 @@ pub(crate) enum Command {
         reply: oneshot::Sender<Result<CommitTimings, OverlayError>>,
     },
     Hide,
+    /// Hide, then reply once the compositor has processed the unmap.
+    HideAck(oneshot::Sender<()>),
     Shutdown,
 }
+
+/// Reply slot carried by the `wl_display.sync` callback of a `HideAck`.
+pub(crate) struct HideAck(std::sync::Mutex<Option<oneshot::Sender<()>>>);
 
 struct OutSurface {
     output_id: OutputId,
@@ -94,6 +99,7 @@ pub(crate) struct State {
     warned_mm: Vec<OutputId>,
     signal: LoopSignal,
     qh: QueueHandle<State>,
+    display: wl_display::WlDisplay,
 }
 
 /// Connect, bind globals and run the event loop until `Shutdown` or a
@@ -112,7 +118,13 @@ pub(crate) fn run(
         WaylandSource::new(conn.clone(), queue)
             .insert(event_loop.handle())
             .map_err(|e| e.to_string())?;
-        let state = State::new(&globals, &qh, events.clone(), event_loop.get_signal())?;
+        let state = State::new(
+            &globals,
+            &qh,
+            events.clone(),
+            event_loop.get_signal(),
+            conn.display(),
+        )?;
         event_loop
             .handle()
             .insert_source(commands, |ev, _, state: &mut State| match ev {
@@ -145,6 +157,7 @@ impl State {
         qh: &QueueHandle<Self>,
         events: mpsc::UnboundedSender<OverlayEvent>,
         signal: LoopSignal,
+        display: wl_display::WlDisplay,
     ) -> Result<Self, String> {
         let compositor =
             CompositorState::bind(globals, qh).map_err(|e| format!("wl_compositor: {e}"))?;
@@ -179,6 +192,7 @@ impl State {
             warned_mm: Vec::new(),
             signal,
             qh: qh.clone(),
+            display,
         })
     }
 
@@ -186,6 +200,13 @@ impl State {
         match cmd {
             Command::Show { scene, reply } => self.show(*scene, reply),
             Command::Hide => self.hide(),
+            Command::HideAck(reply) => {
+                self.hide();
+                // The sync reply arrives after the compositor handled the
+                // destroy requests sent before it.
+                self.display
+                    .sync(&self.qh, HideAck(std::sync::Mutex::new(Some(reply))));
+            }
             Command::Shutdown => {
                 self.hide();
                 self.signal.stop();
@@ -693,6 +714,23 @@ impl Dispatch<wp_viewport::WpViewport, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, HideAck> for State {
+    fn event(
+        _: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        ack: &HideAck,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            if let Some(tx) = ack.0.lock().ok().and_then(|mut g| g.take()) {
+                let _ = tx.send(());
+            }
+        }
     }
 }
 

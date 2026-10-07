@@ -138,6 +138,8 @@ pub struct HintLayout {
     pub uppercase: bool,
     /// Glyph advance as a fraction of the em size (monospace).
     pub advance_em: f32,
+    pub prefix_style: PrefixStyle,
+    pub eliminated: Eliminated,
 }
 
 impl Default for HintLayout {
@@ -156,8 +158,30 @@ impl Default for HintLayout {
             alphabet: "asdfghjkl".into(),
             uppercase: false,
             advance_em: 0.6,
+            prefix_style: PrefixStyle::HighlightMatched,
+            eliminated: Eliminated::Hide,
         }
     }
+}
+
+/// How typed glyphs are coloured inside surviving badges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrefixStyle {
+    /// Matched glyphs in `accent`, remaining in `fg_dim`.
+    #[default]
+    HighlightMatched,
+    /// Vimium style: matched glyphs in `fg_dim`, remaining in `fg`.
+    DimMatched,
+}
+
+/// What happens to badges that no longer match the typed buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Eliminated {
+    #[default]
+    Hide,
+    Fade,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

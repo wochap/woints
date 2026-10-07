@@ -10,8 +10,11 @@ use woints_core::geom::{
     Device, OutputGeom, OutputLocal, Rect, Size, global_to_output, output_to_device,
 };
 use woints_core::place::chip_rect;
-use woints_core::ports::{Chip, Scene};
-use woints_core::theme::{Color, HintLayout, font_device_px, size_factor};
+use woints_core::ports::{BadgeStyle, Chip, Scene};
+use woints_core::theme::{Color, HintLayout, PrefixStyle, font_device_px, size_factor};
+
+/// Opacity of eliminated badges with `hint.eliminated = "fade"`.
+pub const FADED_ALPHA: f32 = 0.2;
 
 /// Atkinson Hyperlegible Mono Bold, SIL OFL 1.1 (see `assets/OFL.txt`).
 pub static FONT_BYTES: &[u8] = include_bytes!("../assets/AtkinsonHyperlegibleMono-Bold.ttf");
@@ -81,8 +84,23 @@ impl Renderer {
                 b.label.clone()
             };
             let radius = hint.radius * g.scale * factor;
-            self.draw_box(&mut pm, dev, radius, border, tokens.bg, tokens.border);
-            self.draw_text(&mut pm, dev, &label, font_px, tokens.fg);
+            let (bg, bd, alpha) = match b.style {
+                BadgeStyle::Normal => (tokens.bg, tokens.border, 1.0),
+                BadgeStyle::Flash => (tokens.flash_bg, tokens.flash_bg, 1.0),
+                BadgeStyle::Faded => (tokens.bg, tokens.border, FADED_ALPHA),
+            };
+            self.draw_box(&mut pm, dev, radius, border, bg, bd, alpha);
+            let colors: Vec<Color> = (0..label.chars().count())
+                .map(|i| match (b.style, b.matched, hint.prefix_style) {
+                    (BadgeStyle::Flash, _, _) => tokens.flash_fg,
+                    (_, 0, _) => tokens.fg,
+                    (_, m, PrefixStyle::HighlightMatched) if i < m => tokens.accent,
+                    (_, _, PrefixStyle::HighlightMatched) => tokens.fg_dim,
+                    (_, m, PrefixStyle::DimMatched) if i < m => tokens.fg_dim,
+                    (_, _, PrefixStyle::DimMatched) => tokens.fg,
+                })
+                .collect();
+            self.draw_text(&mut pm, dev, &label, font_px, &colors, alpha);
         }
 
         if let Some(chip) = scene.chip.as_ref().filter(|c| c.output == g.id) {
@@ -99,12 +117,13 @@ impl Renderer {
         border: i32,
         bg: Color,
         bd: Color,
+        alpha: f32,
     ) {
         let (x, y, w, h) = (r.x as f32, r.y as f32, r.w as f32, r.h as f32);
         if let Some(path) = rounded_rect(x, y, w, h, radius) {
             pm.fill_path(
                 &path,
-                &paint(bg),
+                &paint_a(bg, alpha),
                 FillRule::Winding,
                 Transform::identity(),
                 None,
@@ -122,7 +141,13 @@ impl Renderer {
                 width: border as f32,
                 ..Stroke::default()
             };
-            pm.stroke_path(&path, &paint(bd), &stroke, Transform::identity(), None);
+            pm.stroke_path(
+                &path,
+                &paint_a(bd, alpha),
+                &stroke,
+                Transform::identity(),
+                None,
+            );
         }
     }
 
@@ -132,8 +157,16 @@ impl Renderer {
             .sum()
     }
 
-    /// One text run centred in `r`.
-    fn draw_text(&mut self, pm: &mut Pixmap, r: Rect<Device>, text: &str, px: f32, color: Color) {
+    /// One text run centred in `r`; glyph `i` uses `colors[i]` (last colour repeats).
+    fn draw_text(
+        &mut self,
+        pm: &mut Pixmap,
+        r: Rect<Device>,
+        text: &str,
+        px: f32,
+        colors: &[Color],
+        alpha: f32,
+    ) {
         let lm = self.font.horizontal_line_metrics(px);
         let (ascent, descent) = lm
             .map(|m| (m.ascent, m.descent))
@@ -141,11 +174,16 @@ impl Renderer {
         let width = self.text_width(text, px);
         let mut pen_x = r.x as f32 + (r.w as f32 - width) / 2.0;
         let baseline = r.y as f32 + (r.h as f32 - (ascent - descent)) / 2.0 + ascent;
-        for c in text.chars() {
+        for (i, c) in text.chars().enumerate() {
+            let color = colors
+                .get(i)
+                .or(colors.last())
+                .copied()
+                .unwrap_or(Color::hex(0xffffff));
             let (m, bitmap) = self.glyph(c, px).clone();
             let gx = (pen_x + m.xmin as f32).round() as i32;
             let gy = (baseline - m.height as f32 - m.ymin as f32).round() as i32;
-            blit_coverage(pm, gx, gy, m.width, m.height, &bitmap, color);
+            blit_coverage(pm, gx, gy, m.width, m.height, &bitmap, color, alpha);
             pen_x += m.advance_width;
         }
     }
@@ -189,6 +227,7 @@ impl Renderer {
             border,
             tokens.bg,
             tokens.border,
+            1.0,
         );
 
         let mut x = rect.x;
@@ -199,7 +238,7 @@ impl Renderer {
             } else {
                 tokens.fg
             };
-            self.draw_text(pm, seg, s, font_px, color);
+            self.draw_text(pm, seg, s, font_px, &[color], 1.0);
             x += w;
             if i + 1 < segs.len() {
                 let div = output_to_device(Rect::new(x, rect.y + 4, 1, rect.h - 8), g.scale);
@@ -212,8 +251,12 @@ impl Renderer {
 }
 
 fn paint(c: Color) -> Paint<'static> {
+    paint_a(c, 1.0)
+}
+
+fn paint_a(c: Color, alpha: f32) -> Paint<'static> {
     let mut p = Paint::default();
-    p.set_color_rgba8(c.r, c.g, c.b, 255);
+    p.set_color_rgba8(c.r, c.g, c.b, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8);
     p.anti_alias = true;
     p
 }
@@ -245,8 +288,19 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Pat
     pb.finish()
 }
 
-/// Source-over blend of an 8-bit coverage mask in an opaque colour.
-fn blit_coverage(pm: &mut Pixmap, x0: i32, y0: i32, w: usize, h: usize, cov: &[u8], c: Color) {
+/// Source-over blend of an 8-bit coverage mask in colour `c` at `alpha`.
+#[allow(clippy::too_many_arguments)]
+fn blit_coverage(
+    pm: &mut Pixmap,
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+    cov: &[u8],
+    c: Color,
+    alpha: f32,
+) {
+    let alpha = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
     let (pw, ph) = (pm.width() as i32, pm.height() as i32);
     let data = pm.data_mut();
     for row in 0..h as i32 {
@@ -259,7 +313,7 @@ fn blit_coverage(pm: &mut Pixmap, x0: i32, y0: i32, w: usize, h: usize, cov: &[u
             if x < 0 || x >= pw {
                 continue;
             }
-            let a = u32::from(cov[(row * w as i32 + col) as usize]);
+            let a = (u32::from(cov[(row * w as i32 + col) as usize]) * alpha + 127) / 255;
             if a == 0 {
                 continue;
             }
@@ -300,7 +354,7 @@ mod tests {
     use super::*;
     use woints_core::geom::{Global, OutputId, Point};
     use woints_core::place::badge_size;
-    use woints_core::ports::Badge;
+    use woints_core::ports::{Badge, BadgeStyle};
     use woints_core::theme::Theme;
 
     fn output(scale: f32) -> OutputSurface {
@@ -331,6 +385,40 @@ mod tests {
         (x0, y0, x1 - x0, y1 - y0)
     }
 
+    /// Count pixels whose RGB equals `c` after rendering one badge.
+    fn count_color(style: BadgeStyle, matched: usize, c: Color) -> usize {
+        let theme = Theme::default();
+        let s = badge_size(2, &theme.hint);
+        let scene = Scene {
+            outputs: vec![],
+            badges: vec![Badge {
+                label: "as".into(),
+                rect: Rect::<Global>::new(10, 10, s.w * 3, s.h * 3),
+                output: OutputId("T".into()),
+                matched,
+                style,
+            }],
+            chip: None,
+            theme,
+        };
+        let pm = Renderer::new().render(&scene, &output(1.0));
+        pm.data()
+            .chunks_exact(4)
+            .filter(|p| p[0] == c.r && p[1] == c.g && p[2] == c.b && p[3] == 255)
+            .count()
+    }
+
+    #[test]
+    fn filter_styles() {
+        let t = Theme::default().tokens;
+        assert_eq!(count_color(BadgeStyle::Normal, 0, t.accent), 0);
+        assert!(count_color(BadgeStyle::Normal, 1, t.accent) > 0);
+        assert!(count_color(BadgeStyle::Flash, 0, t.flash_bg) > 0);
+        // Faded badges are translucent: no fully opaque background pixel.
+        assert_eq!(count_color(BadgeStyle::Faded, 0, t.bg), 0);
+        assert!(count_color(BadgeStyle::Normal, 0, t.bg) > 0);
+    }
+
     fn badge_pixels(scale: f32) -> (u32, u32) {
         let theme = Theme::default();
         let s = badge_size(2, &theme.hint);
@@ -340,6 +428,8 @@ mod tests {
                 label: "as".into(),
                 rect: Rect::<Global>::new(10, 10, s.w, s.h),
                 output: OutputId("T".into()),
+                matched: 0,
+                style: BadgeStyle::Normal,
             }],
             chip: None,
             theme,
@@ -380,6 +470,8 @@ mod tests {
                 label: "as".into(),
                 rect: Rect::new(10, 10, 22, 17),
                 output: OutputId("T".into()),
+                matched: 0,
+                style: BadgeStyle::Normal,
             }],
             chip: None,
             theme,

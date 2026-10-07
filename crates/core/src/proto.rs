@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::geom::{Global, OutputId, Rect};
-use crate::model::{Element, Scope, Target, Timings};
+use crate::model::{ActionKind, Element, ElementId, Scope, Target, Timings};
+use crate::ports::CollectReport;
 
 /// Socket file name under `$XDG_RUNTIME_DIR`.
 pub const SOCKET_NAME: &str = "woints.sock";
@@ -21,14 +22,19 @@ fn default_iterations() -> u32 {
     10
 }
 
+fn default_action() -> ActionKind {
+    ActionKind::Activate
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Hints {
         #[serde(default)]
         scope: Scope,
+        /// Action performed when a label is matched (default `activate`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        action: Option<String>,
+        action: Option<ActionKind>,
     },
     Cancel,
     Status,
@@ -43,9 +49,18 @@ pub enum Request {
         #[serde(default)]
         scope: Scope,
     },
+    /// Act on an element of a stored snapshot without showing the overlay.
+    Act {
+        snapshot_id: u64,
+        id: ElementId,
+        #[serde(default = "default_action")]
+        action: ActionKind,
+    },
 }
 
-const COMMANDS: &[&str] = &["hints", "cancel", "status", "quit", "snapshot", "bench"];
+const COMMANDS: &[&str] = &[
+    "hints", "cancel", "status", "quit", "snapshot", "bench", "act",
+];
 
 /// Parse one request line, producing the protocol's error message on failure.
 pub fn parse_request(line: &str) -> Result<Request, String> {
@@ -151,6 +166,37 @@ pub struct StatusReply {
     pub hyprland_version: Option<String>,
     pub overlay: bool,
     pub last_timings: Timings,
+    #[serde(default)]
+    pub providers: Vec<ProviderStatus>,
+    /// Reports from the last collection, one per target.
+    #[serde(default)]
+    pub last_collect: Vec<CollectReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action: Option<ActionOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderStatus {
+    pub name: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// Result of the most recent action, from the overlay or `act`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionOutcome {
+    pub element: ElementId,
+    pub action: ActionKind,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub ms: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActReply {
+    pub performed: ActionKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -196,9 +242,17 @@ mod tests {
         rt(
             Request::Hints {
                 scope: Scope::All,
-                action: Some("click".into()),
+                action: Some(ActionKind::Focus),
             },
-            json!({"cmd":"hints","scope":"all","action":"click"}),
+            json!({"cmd":"hints","scope":"all","action":"focus"}),
+        );
+        rt(
+            Request::Act {
+                snapshot_id: 17,
+                id: ElementId(3),
+                action: ActionKind::Right,
+            },
+            json!({"cmd":"act","snapshot_id":17,"id":3,"action":"right"}),
         );
         rt(Request::Cancel, json!({"cmd":"cancel"}));
         rt(Request::Status, json!({"cmd":"status"}));
@@ -233,6 +287,26 @@ mod tests {
                 iterations: 10,
                 scope: Scope::Focused
             }
+        );
+    }
+
+    #[test]
+    fn act_defaults_and_reply() {
+        assert_eq!(
+            parse_request(r#"{"cmd":"act","snapshot_id":17,"id":3}"#).unwrap(),
+            Request::Act {
+                snapshot_id: 17,
+                id: ElementId(3),
+                action: ActionKind::Activate
+            }
+        );
+        assert!(parse_request(r#"{"cmd":"act","snapshot_id":1,"id":1,"action":"jump"}"#).is_err());
+        assert_eq!(
+            serde_json::to_value(Response::with(&ActReply {
+                performed: ActionKind::Activate
+            }))
+            .unwrap(),
+            json!({"ok":true,"performed":"activate"})
         );
     }
 

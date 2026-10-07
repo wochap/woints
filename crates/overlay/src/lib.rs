@@ -105,6 +105,17 @@ impl Overlay for OverlayHandle {
             .send(Command::Hide)
             .map_err(|_| OverlayError::Unavailable)
     }
+
+    async fn hide_and_wait(&self) -> Result<(), OverlayError> {
+        if !self.is_alive() {
+            return Err(OverlayError::Unavailable);
+        }
+        let (tx, rx) = oneshot::channel();
+        self.commands
+            .send(Command::HideAck(tx))
+            .map_err(|_| OverlayError::Unavailable)?;
+        rx.await.map_err(|_| OverlayError::Unavailable)
+    }
 }
 
 impl Drop for OverlayHandle {

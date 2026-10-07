@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use woints_core::geom::{OutputGeom, OutputId, Point, Rect};
-use woints_core::ports::{Badge, Overlay, Scene};
+use woints_core::ports::{Badge, BadgeStyle, Overlay, Scene};
 use woints_core::theme::Theme;
 
 #[tokio::test]
@@ -26,6 +26,8 @@ async fn maps_on_focused_output_for_500ms() {
             label: "as".into(),
             rect: Rect::new(origin.x + 40, origin.y + 40, 22, 17),
             output: OutputId(m.name.clone()),
+            matched: 0,
+            style: BadgeStyle::Normal,
         }],
         chip: None,
         theme: Theme::default(),

@@ -6,6 +6,7 @@ pub mod labels;
 pub mod model;
 pub mod place;
 pub mod ports;
+pub mod profile;
 pub mod proto;
 pub mod theme;
 
