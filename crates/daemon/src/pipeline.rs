@@ -586,8 +586,12 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
         if layer_refs.is_empty() {
             LayerCollect::default()
         } else {
+            // Layers go through forked `qs ipc` calls (50–100 ms each on
+            // quickshell 0.3.1), so give them the configured quickshell budget
+            // instead of the in-process AT-SPI one.
+            let qs_budget = Duration::from_millis(config.providers.quickshell.budget_ms);
             let budget = Budget {
-                deadline: Instant::now() + PROVIDER_BUDGET,
+                deadline: Instant::now() + PROVIDER_BUDGET.max(qs_budget),
             };
             layers.collect_layers(&layer_refs, budget).await
         }

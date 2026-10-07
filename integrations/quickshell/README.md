@@ -9,24 +9,55 @@ quickshell IPC. Without it, woints falls back to vision on quickshell layers.
 
 Pick one:
 
-- **Plain copy** (any distro): copy this directory to
-  `~/.config/quickshell/<your config>/Woints` (next to `shell.qml`). Quickshell
-  resolves `import Woints` from the config directory.
-- **Import path**: point `QML_IMPORT_PATH` (or `QML2_IMPORT_PATH`) at a
-  directory containing `Woints/`, e.g. this repo's `integrations/quickshell`
-  parent with the directory renamed or symlinked to `Woints`.
-- **Nix**: the flake output `packages.<system>.quickshell-module` installs to
-  `share/quickshell/Woints`; add `${pkg}/share/quickshell` to
-  `QML_IMPORT_PATH` of your quickshell service, or link it into your config:
+- **Plain copy into the config** (recommended, verified on quickshell 0.3.1):
+  copy only the two QML files to `~/.config/quickshell/<your config>/Woints/`
+  (next to `shell.qml`) and import it as **`qs.Woints`**:
 
-  ```nix
-  xdg.configFile."quickshell/shell/Woints".source =
-    "${inputs.woints.packages.${pkgs.system}.quickshell-module}/share/quickshell/Woints";
+  ```sh
+  mkdir -p ~/.config/quickshell/shell/Woints
+  cp integrations/quickshell/{SHints.qml,Hintable.qml} ~/.config/quickshell/shell/Woints/
   ```
 
-Then `import Woints` in the files that declare buttons. `woints doctor` shows,
-per quickshell instance, whether the module is present and how many items it
+  Do **not** copy `qmldir`: quickshell exposes config subdirectories as
+  `qs.<dir>` and synthesises the qmldir (including the `SHints` singleton from
+  `pragma Singleton`); a hand-written `module Woints` qmldir disables that and
+  the import fails with `module "Woints" is not installed`.
+- **Import path**: point `QML_IMPORT_PATH` at a directory containing `Woints/`
+  (with the shipped `qmldir`), then use bare `import Woints`. Untested on
+  quickshell 0.3.1 (TODO(verify)).
+- **Nix**: the flake output `packages.<system>.quickshell-module` installs to
+  `share/quickshell/Woints` (with `qmldir`, for the import-path route). For the
+  config-copy route link the two QML files, not the directory:
+
+  ```nix
+  xdg.configFile."quickshell/shell/Woints/SHints.qml".source =
+    "${inputs.woints.packages.${pkgs.system}.quickshell-module}/share/quickshell/Woints/SHints.qml";
+  xdg.configFile."quickshell/shell/Woints/Hintable.qml".source =
+    "${inputs.woints.packages.${pkgs.system}.quickshell-module}/share/quickshell/Woints/Hintable.qml";
+  ```
+
+Then `import qs.Woints` (config-copy route) or `import Woints` (import-path
+route) in the files that declare buttons, and import it once in `shell.qml`
+so the `woints` IPC target registers at startup. `woints doctor` shows, per
+quickshell instance, whether the module is present and how many items it
 lists.
+
+### Windows must expose their layer namespace
+
+Woints pairs items with Hyprland layer surfaces by namespace. The attached
+`WlrLayershell` object is not readable from JavaScript, so every
+`PanelWindow` that contains hintable items needs a plain property mirroring
+it:
+
+```qml
+PanelWindow {
+    WlrLayershell.namespace: "quickshell:bar"
+    readonly property string namespace: WlrLayershell.namespace
+    ...
+}
+```
+
+Without it `list()` reports `ns: ""` and the items are dropped.
 
 Do not import the module in a lock-screen config: woints only talks to
 instances that register the `woints` IPC target, and hints over a lock
@@ -39,7 +70,7 @@ Inside a reusable button component, so every button is hintable:
 ```qml
 // BarButton.qml
 import QtQuick
-import Woints
+import qs.Woints   // or `import Woints` on the import-path route
 
 MouseArea {
     id: button

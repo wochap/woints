@@ -415,6 +415,8 @@ pub enum ProviderMode {
 pub struct QuickshellConfig {
     pub mode: ProviderMode,
     /// Budget for one `qs ipc call`, ms; the child is killed on overrun.
+    /// A forked `qs ipc call` takes 50–100 ms on quickshell 0.3.1 (measured
+    /// 2026-10-07), so this must stay well above that.
     pub budget_ms: u64,
 }
 
@@ -422,7 +424,7 @@ impl Default for QuickshellConfig {
     fn default() -> Self {
         Self {
             mode: ProviderMode::Auto,
-            budget_ms: 40,
+            budget_ms: 250,
         }
     }
 }

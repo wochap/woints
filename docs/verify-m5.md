@@ -26,17 +26,19 @@ pkill -x wointsd; ./target/release/wointsd &
 
 ### Task 3.5 — quickshell module on your shell
 
-1. Install the module next to `shell.qml` (plain copy; a symlink also works):
+1. Install the two QML files next to `shell.qml` (no `qmldir`, see the module
+   README) and add `readonly property string namespace: WlrLayershell.namespace`
+   to every `PanelWindow` with hintable items:
 
    ```sh
-   cp -r integrations/quickshell ~/.config/quickshell/shell/Woints
-   # or: ln -s "$PWD/integrations/quickshell" ~/.config/quickshell/shell/Woints
+   mkdir -p ~/.config/quickshell/shell/Woints
+   cp integrations/quickshell/{SHints.qml,Hintable.qml} ~/.config/quickshell/shell/Woints/
    ```
 
 2. In a bar file, e.g. a workspace or tray button component, add:
 
    ```qml
-   import Woints
+   import qs.Woints
 
    // inside the button's MouseArea / root item
    Hintable {

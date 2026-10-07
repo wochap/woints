@@ -113,7 +113,7 @@ default = "click"
 
 [providers.quickshell]
 mode      = "auto"  # "auto" | "off"
-budget_ms = 40
+budget_ms = 250  # one `qs ipc call` fork takes 50–100 ms; killed on overrun
 
 [apps]
 disabled_classes     = []  # class globs never hinted

@@ -234,19 +234,68 @@ pub fn parse_layers(s: &str) -> std::result::Result<Vec<LayerEntry>, serde_json:
     Ok(out)
 }
 
+/// How this Hyprland build parses `dispatch` arguments.
+///
+/// Builds with the Lua config API (0.56+ with `hyprland.lua`) treat
+/// `dispatch <args>` as `hl.dispatch(<args>)`, so dispatchers must be Lua
+/// expressions such as `hl.dsp.cursor.move({ x = 1, y = 2 })`. Older builds
+/// take the hyprlang form `movecursor 1 2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchSyntax {
+    Lua,
+    Legacy,
+}
+
 /// Request client for `.socket.sock`. Cheap to clone; one connection per request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Hypr {
     dir: PathBuf,
+    syntax: std::sync::Arc<std::sync::OnceLock<DispatchSyntax>>,
 }
 
 impl Hypr {
     pub fn from_env() -> Result<Self> {
-        Ok(Self { dir: socket_dir()? })
+        Ok(Self {
+            dir: socket_dir()?,
+            ..Self::default()
+        })
     }
 
     pub fn with_dir(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Force the dispatch syntax instead of probing (config `hypr.dispatch_syntax`).
+    pub fn with_syntax(self, syntax: DispatchSyntax) -> Self {
+        let _ = self.syntax.set(syntax);
+        self
+    }
+
+    /// Detect the dispatch syntax once: `eval return 1` answers `ok` only on
+    /// Lua-enabled builds. Verified live on Hyprland 0.56.2 (2026-10-07).
+    pub async fn dispatch_syntax(&self) -> DispatchSyntax {
+        if let Some(s) = self.syntax.get() {
+            return *s;
+        }
+        let detected = match self.request("eval return 1").await {
+            Ok(reply) if reply.trim() == "ok" => DispatchSyntax::Lua,
+            _ => DispatchSyntax::Legacy,
+        };
+        let _ = self.syntax.set(detected);
+        detected
+    }
+
+    /// Move the cursor to a global logical point with the right dispatcher
+    /// for this build (`hl.dsp.cursor.move` or `movecursor`).
+    pub async fn move_cursor(&self, p: Point<Global>) -> Result<()> {
+        let cmd = match self.dispatch_syntax().await {
+            DispatchSyntax::Lua => format!("hl.dsp.cursor.move({{ x = {}, y = {} }})", p.x, p.y),
+            DispatchSyntax::Legacy => format!("movecursor {} {}", p.x, p.y),
+        };
+        self.dispatch(&cmd).await
     }
 
     /// Send a raw request and read the reply to EOF.
@@ -933,6 +982,69 @@ mod tests {
         srv.await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         r
+    }
+
+    /// Serve `n` connections, recording each request; reply with the given
+    /// strings in order.
+    async fn serve_script(
+        tag: &str,
+        replies: Vec<&'static str>,
+    ) -> (PathBuf, tokio::task::JoinHandle<Vec<String>>) {
+        let dir =
+            std::env::temp_dir().join(format!("woints-hypr-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let l = tokio::net::UnixListener::bind(dir.join(".socket.sock")).unwrap();
+        let srv = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for reply in replies {
+                let (mut s, _) = l.accept().await.unwrap();
+                let mut buf = [0u8; 256];
+                let n = s.read(&mut buf).await.unwrap();
+                seen.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                s.write_all(reply.as_bytes()).await.unwrap();
+            }
+            seen
+        });
+        (dir, srv)
+    }
+
+    #[tokio::test]
+    async fn move_cursor_uses_lua_dispatcher_when_eval_works() {
+        let (dir, srv) = serve_script("lua", vec!["ok", "ok"]).await;
+        let h = Hypr::with_dir(&dir);
+        h.move_cursor(Point::new(25, 750)).await.unwrap();
+        assert_eq!(h.dispatch_syntax().await, DispatchSyntax::Lua);
+        let seen = srv.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            seen,
+            vec![
+                "eval return 1".to_string(),
+                "dispatch hl.dsp.cursor.move({ x = 25, y = 750 })".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn move_cursor_falls_back_to_legacy_when_eval_unknown() {
+        let (dir, srv) = serve_script("legacy", vec!["unknown request", "ok"]).await;
+        let h = Hypr::with_dir(&dir);
+        h.move_cursor(Point::new(-1780, 120)).await.unwrap();
+        assert_eq!(h.dispatch_syntax().await, DispatchSyntax::Legacy);
+        let seen = srv.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen[1], "dispatch movecursor -1780 120");
+    }
+
+    #[tokio::test]
+    async fn with_syntax_skips_probe() {
+        let (dir, srv) = serve_script("forced", vec!["ok"]).await;
+        let h = Hypr::with_dir(&dir).with_syntax(DispatchSyntax::Legacy);
+        h.move_cursor(Point::new(1, 2)).await.unwrap();
+        let seen = srv.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen, vec!["dispatch movecursor 1 2".to_string()]);
     }
 
     #[tokio::test]

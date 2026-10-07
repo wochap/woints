@@ -18,15 +18,27 @@ use woints_hypr::Hypr;
 pub trait CursorIpc {
     /// `dispatch <cmd>`; `Err` carries the non-`ok` reply.
     fn dispatch(&self, cmd: &str) -> impl Future<Output = Result<(), String>> + Send;
+    /// Place the cursor at a global logical point using whichever dispatcher
+    /// syntax the running Hyprland accepts (Lua `hl.dsp.cursor.move` or
+    /// legacy `movecursor`).
+    fn move_cursor(&self, p: Point<Global>) -> impl Future<Output = Result<(), String>> + Send;
     fn cursor_pos(&self) -> impl Future<Output = Result<Point<Global>, String>> + Send;
+}
+
+fn dispatch_reply(e: woints_hypr::Error) -> String {
+    match e {
+        woints_hypr::Error::Dispatch(reply) => reply,
+        e => e.to_string(),
+    }
 }
 
 impl CursorIpc for Hypr {
     async fn dispatch(&self, cmd: &str) -> Result<(), String> {
-        Hypr::dispatch(self, cmd).await.map_err(|e| match e {
-            woints_hypr::Error::Dispatch(reply) => reply,
-            e => e.to_string(),
-        })
+        Hypr::dispatch(self, cmd).await.map_err(dispatch_reply)
+    }
+
+    async fn move_cursor(&self, p: Point<Global>) -> Result<(), String> {
+        Hypr::move_cursor(self, p).await.map_err(dispatch_reply)
     }
 
     async fn cursor_pos(&self) -> Result<Point<Global>, String> {
@@ -50,7 +62,7 @@ pub struct MovecursorBackend<I, V> {
 impl<I: CursorIpc + Sync, V: VirtualPointer + Sync> PointerBackend for MovecursorBackend<I, V> {
     async fn move_to(&self, p: Point<Global>) -> Result<(), ActError> {
         self.ipc
-            .dispatch(&format!("movecursor {} {}", p.x, p.y))
+            .move_cursor(p)
             .await
             .map_err(|reply| ActError::Failed(format!("movecursor failed: {reply}")))
     }
@@ -315,6 +327,9 @@ mod tests {
     }
 
     impl CursorIpc for Rec {
+        async fn move_cursor(&self, p: Point<Global>) -> Result<(), String> {
+            CursorIpc::dispatch(self, &format!("movecursor {} {}", p.x, p.y)).await
+        }
         async fn dispatch(&self, cmd: &str) -> Result<(), String> {
             self.push(cmd.to_owned());
             match &self.fail_move {
@@ -381,6 +396,9 @@ mod tests {
     impl CursorIpc for &Rec {
         async fn dispatch(&self, cmd: &str) -> Result<(), String> {
             (**self).dispatch(cmd).await
+        }
+        async fn move_cursor(&self, p: Point<Global>) -> Result<(), String> {
+            CursorIpc::move_cursor(*self, p).await
         }
         async fn cursor_pos(&self) -> Result<Point<Global>, String> {
             CursorIpc::cursor_pos(*self).await

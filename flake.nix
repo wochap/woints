@@ -80,7 +80,8 @@
         };
         quickshell-module = pkgs.runCommand "woints-quickshell-module" { } ''
           mkdir -p $out/share/quickshell/Woints
-          cp ${./integrations/quickshell}/{qmldir,SHints.qml,Hintable.qml,README.md} $out/share/quickshell/Woints/
+          cp -v ${./integrations/quickshell}/*.qml ${./integrations/quickshell}/qmldir ${./integrations/quickshell}/README.md $out/share/quickshell/Woints/
+          test -s $out/share/quickshell/Woints/SHints.qml
         '';
       });
 

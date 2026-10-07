@@ -29,6 +29,8 @@ Singleton {
         delete root._entries[id];
     }
 
+    // The attached WlrLayershell object is not reachable from JS, so windows
+    // must mirror it: `readonly property string namespace: WlrLayershell.namespace`.
     function _namespace(win) {
         if (!win)
             return "";

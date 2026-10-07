@@ -110,9 +110,12 @@ in {
     Install.WantedBy = [ "graphical-session.target" ];
   };
 
-  # Optional: the quickshell module next to your shell.qml
-  xdg.configFile."quickshell/shell/Woints".source =
-    "${woints.quickshell-module}/share/quickshell/Woints";
+  # Optional: the quickshell module next to your shell.qml (import as `qs.Woints`;
+  # link the QML files only, quickshell must synthesise the qmldir itself)
+  xdg.configFile."quickshell/shell/Woints/SHints.qml".source =
+    "${woints.quickshell-module}/share/quickshell/Woints/SHints.qml";
+  xdg.configFile."quickshell/shell/Woints/Hintable.qml".source =
+    "${woints.quickshell-module}/share/quickshell/Woints/Hintable.qml";
 
   # Optional: config (defaults shown in config.example.toml)
   xdg.configFile."woints/config.toml".text = ''

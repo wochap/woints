@@ -236,6 +236,10 @@ impl<R: Runner> QuickshellIpcProvider<R> {
         pids.sort_unstable();
         pids.dedup();
         let mut timings = Timings::default();
+        // Discovery (`qs list`, `qs ipc show`) is cached per pid after the first
+        // request; do not charge it against the `list` timeout, otherwise the
+        // first request after startup always times out.
+        let remaining = budget.deadline.saturating_duration_since(Instant::now());
         let ids = if pids.is_empty() {
             HashMap::new()
         } else {
@@ -244,9 +248,7 @@ impl<R: Runner> QuickshellIpcProvider<R> {
         let mut uniq: Vec<&String> = ids.values().collect();
         uniq.sort();
         uniq.dedup();
-        let timeout = self
-            .budget
-            .min(budget.deadline.saturating_duration_since(Instant::now()));
+        let timeout = self.budget.min(remaining);
         let lists = futures::future::join_all(
             uniq.iter()
                 .map(|id| async move { (id.to_string(), self.list(id, timeout).await) }),
