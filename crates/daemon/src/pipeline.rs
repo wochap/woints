@@ -598,8 +598,13 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
     };
     let ((top_out, sub), lc) = tokio::join!(tops, lays);
     let mut per_target: Vec<Vec<Element>> = vec![Vec::new(); targets.len()];
+    // A layer is "served" when its quickshell instance answered `list`, even
+    // with zero items (an empty notification popup, a bar with nothing
+    // mapped); only layers with no provider at all fall back to vision.
+    let mut served: Vec<bool> = vec![false; targets.len()];
     let mut reports = Vec::new();
     for (&i, (els, rep)) in top_idx.iter().zip(top_out) {
+        served[i] = !els.is_empty();
         per_target[i] = els;
         reports.push(rep);
     }
@@ -607,6 +612,7 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
         .filter(|&i| targets[i].surface.is_layer())
         .collect();
     for (&i, c) in layer_idx.iter().zip(lc.per_target) {
+        served[i] = !c.elements.is_empty() || c.report.paired.is_some();
         per_target[i] = c.elements;
         reports.push(c.report);
     }
@@ -622,12 +628,12 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
     let mut vision_timings = Timings::default();
     let mut merge_ms = Duration::ZERO;
     let mut finals: Vec<Vec<Element>> = Vec::with_capacity(targets.len());
-    for (target, atspi) in targets.iter().zip(per_target) {
+    for ((target, atspi), served) in targets.iter().zip(per_target).zip(served) {
         let usable = match action {
             Some(a) => atspi.iter().filter(|e| hintable(e, a)).count(),
             None => atspi.len(),
         };
-        let (run, reason) = vision.decide(usable, target, !atspi.is_empty());
+        let (run, reason) = vision.decide(usable, target, served);
         tracing::debug!(class = %target.class, usable, run, reason, "vision decision");
         if report.reason.is_empty() || run && !report.ran {
             report = VisionReport {
