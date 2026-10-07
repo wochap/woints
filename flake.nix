@@ -31,7 +31,11 @@
           src = pkgs.lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
           buildFeatures = features;
-          nativeBuildInputs = [ pkgs.pkg-config ] ++ pkgs.lib.optional (onnxruntime != null) pkgs.makeWrapper;
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.installShellFiles
+          ]
+          ++ pkgs.lib.optional (onnxruntime != null) pkgs.makeWrapper;
           buildInputs = runtimeLibs pkgs;
           # Live tests need a Hyprland session; unit tests run in checkPhase.
           preCheck = pkgs.lib.optionalString (onnxruntime != null) ''
@@ -44,6 +48,7 @@
               done
             ''
             + ''
+              installShellCompletion --zsh ${./integrations/zsh/_woints}
               if find $out \( -name '*.onnx' -o -name '*.pt' -o -name '*.safetensors' \) | grep -q .; then
                 echo "model weights must not be packaged" >&2
                 exit 1

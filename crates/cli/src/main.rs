@@ -417,4 +417,162 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["woints", "hints", "--action", "teleport"]).is_err());
     }
+
+    /// `name)` arms of the `case "$subcmd" in` block, keyed by each name.
+    fn completion_arms(src: &str) -> std::collections::BTreeMap<String, String> {
+        let block = src
+            .split_once("case \"$subcmd\" in")
+            .expect("subcommand case block")
+            .1
+            .split_once("esac")
+            .expect("esac")
+            .0;
+        let mut arms = std::collections::BTreeMap::new();
+        for chunk in block.split(";;") {
+            let Some((names, body)) = chunk.trim().split_once(')') else {
+                continue;
+            };
+            for name in names.split('|') {
+                arms.insert(name.trim().to_owned(), body.to_owned());
+            }
+        }
+        arms
+    }
+
+    /// Every `--word` flag in `text`, plus `-x` short flags written as the
+    /// `{-x,--word}` alias pairs of `_arguments` specs.
+    fn flags_in(text: &str) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for (i, _) in text.match_indices("--") {
+            let word: String = text[i + 2..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if !word.is_empty() && !text[..i].ends_with('-') {
+                out.insert(format!("--{word}"));
+            }
+        }
+        for (i, _) in text.match_indices("{-") {
+            if let Some(c) = text[i + 2..]
+                .chars()
+                .next()
+                .filter(char::is_ascii_alphanumeric)
+            {
+                out.insert(format!("-{c}"));
+            }
+        }
+        out
+    }
+
+    /// Long and short flags of `cmd`, built-in `--help`/`--version` included.
+    fn clap_flags(cmd: &clap::Command) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for a in cmd.get_arguments() {
+            out.extend(a.get_long().map(|l| format!("--{l}")));
+            out.extend(a.get_short().map(|s| format!("-{s}")));
+        }
+        out
+    }
+
+    #[test]
+    fn completions_match_cli() {
+        use clap::CommandFactory;
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../integrations/zsh/_woints"
+        ));
+        let src: String = raw
+            .lines()
+            .map(|l| match l.find('#') {
+                Some(i) if l[..i].trim().is_empty() || l[..i].ends_with(' ') => &l[..i],
+                _ => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut cli = Cli::command();
+        cli.build();
+
+        let (root, rest) = src.split_once("case \"$subcmd\" in").unwrap();
+        let common = src
+            .split_once("common=(")
+            .and_then(|(_, r)| r.split_once("\n  )"))
+            .map(|(c, _)| c)
+            .expect("common=( block");
+        let root_flags = flags_in(root.split_once("_woints() {").unwrap().1);
+        assert_eq!(root_flags, clap_flags(&cli), "root flags");
+        let common = flags_in(common);
+
+        let menu = src
+            .split_once("commands=(")
+            .and_then(|(_, r)| r.split_once("\n  )"))
+            .unwrap()
+            .0;
+        let menu: std::collections::BTreeSet<_> = menu
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix('\'')?.split_once(':'))
+            .map(|(n, _)| n.to_owned())
+            .collect();
+        let arms = completion_arms(&format!("case \"$subcmd\" in{rest}"));
+        let subs: std::collections::BTreeSet<_> = cli
+            .get_subcommands()
+            .map(|c| c.get_name().to_owned())
+            .collect();
+        assert_eq!(menu, subs, "commands=( menu");
+        assert_eq!(
+            arms.keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            subs,
+            "case arms"
+        );
+
+        for sub in cli.get_subcommands() {
+            let name = sub.get_name();
+            let want = clap_flags(sub);
+            let mut have = flags_in(&arms[name]);
+            if arms[name].contains("$common") {
+                have.extend(common.iter().cloned());
+            }
+            if let Some(f) = want.difference(&have).next() {
+                panic!("{name} {f} missing from the completion file");
+            }
+            if let Some(f) = have.difference(&want).next() {
+                panic!("{name} {f} in the completion file is not a clap flag");
+            }
+        }
+
+        let values = |helper: &str| -> Vec<String> {
+            let body = src
+                .split_once(&format!("{helper}() {{"))
+                .and_then(|(_, r)| r.split_once("\n}"))
+                .unwrap_or_else(|| panic!("{helper} missing"))
+                .0;
+            body.lines()
+                .filter_map(|l| l.trim().strip_prefix('\'')?.split_once(':'))
+                .map(|(v, _)| v.to_owned())
+                .collect()
+        };
+        let scopes = [
+            Scope::Focused,
+            Scope::FocusedAndLayers,
+            Scope::Layers,
+            Scope::All,
+        ];
+        assert_eq!(
+            values("_woints_scopes"),
+            scopes.map(|s| s.as_str().to_owned())
+        );
+        for v in values("_woints_scopes") {
+            assert!(v.parse::<Scope>().is_ok(), "scope {v}");
+        }
+        assert_eq!(
+            values("_woints_actions"),
+            Action::ALL.map(|a| a.as_str().to_owned())
+        );
+        let axes = values("_woints_axes");
+        assert_eq!(axes, ["v", "h", "vertical", "horizontal"]);
+        for v in axes {
+            assert!(v.parse::<Axis>().is_ok(), "axis {v}");
+        }
+    }
 }

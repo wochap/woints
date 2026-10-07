@@ -1,0 +1,121 @@
+#compdef woints
+
+_woints_commands() {
+  local -a commands
+  commands=(
+    'hints:Show hints'
+    'cancel:Hide hints'
+    'status:Daemon state, outputs and last timings'
+    'quit:Stop the daemon'
+    'snapshot:Targets and elements as JSON, without showing the overlay'
+    'act:Act on an element of a snapshot without showing the overlay'
+    'bench:Run the pipeline N times (no overlay) and print p50/p95 per stage'
+    'reload:Re-read the config file (same as SIGHUP)'
+    'doctor:Diagnose accessibility, Wayland, quickshell and config'
+    'help:Print help for a subcommand'
+  )
+  _describe 'command' commands
+}
+
+_woints_scopes() {
+  local -a scopes
+  scopes=(
+    'focused:Focused window'
+    'focused+layers:Focused window and layer surfaces'
+    'layers:Layer surfaces only'
+    'all:Every visible window and layer surface'
+  )
+  _describe 'scope' scopes
+}
+
+_woints_actions() {
+  local -a actions
+  actions=(
+    'click:Left click'
+    'right:Right click'
+    'middle:Middle click'
+    'double:Double click'
+    'hover:Move the pointer over the element'
+    'focus:Give the element keyboard focus'
+    'drag:Drag onto a second element'
+    'scroll:Scroll over the element'
+    'copy:Copy the element text'
+  )
+  _describe 'action' actions
+}
+
+_woints_axes() {
+  local -a axes
+  axes=(
+    'v:Vertical'
+    'h:Horizontal'
+    'vertical:Vertical'
+    'horizontal:Horizontal'
+  )
+  _describe 'axis' axes
+}
+
+_woints() {
+  local -a common
+  common=(
+    '--json[Print the raw JSON response]'
+    '(- *)'{-h,--help}'[Print help]'
+  )
+
+  # Find current subcommand
+  local subcmd subcmd_idx=0
+  for ((i = 2; i < CURRENT; i++)); do
+    case "${words[i]}" in
+    hints | cancel | status | quit | snapshot | act | bench | reload | doctor | help)
+      subcmd="${words[i]}"
+      subcmd_idx=$i
+      break
+      ;;
+    esac
+  done
+
+  if [[ -z "$subcmd" ]]; then
+    _arguments -s $common \
+      '(- *)'{-V,--version}'[Print version]' \
+      '1: :_woints_commands'
+    return
+  fi
+
+  # Parse from the subcommand on, as if it were the command name
+  words=("${(@)words[subcmd_idx,-1]}")
+  (( CURRENT -= subcmd_idx - 1 ))
+
+  case "$subcmd" in
+  hints)
+    _arguments -s $common \
+      '--scope=[Surfaces to cover]:scope:_woints_scopes' \
+      '--action=[Action to perform on the picked element]:action:_woints_actions'
+    ;;
+  snapshot)
+    _arguments -s $common \
+      '--scope=[Surfaces to cover]:scope:_woints_scopes'
+    ;;
+  bench)
+    _arguments -s $common \
+      '(-n --iterations)'{-n+,--iterations=}'[Pipeline runs (default 10)]:iterations: ' \
+      '--scope=[Surfaces to cover]:scope:_woints_scopes'
+    ;;
+  act)
+    _arguments -s $common \
+      '--snapshot=[Snapshot id]:snapshot id: ' \
+      '--id=[Element id]:element id: ' \
+      '--action=[Action to perform (default click)]:action:_woints_actions' \
+      '--to=[Drag destination element id]:element id: ' \
+      '--axis=[Scroll axis]:axis:_woints_axes' \
+      '--amount=[Scroll lines; negative scrolls up or left]:lines: '
+    ;;
+  cancel | status | quit | reload | doctor)
+    _arguments -s $common
+    ;;
+  help)
+    _arguments '1: :_woints_commands'
+    ;;
+  esac
+}
+
+_woints "$@"

@@ -173,6 +173,19 @@ wointsd [--config PATH]
 `1` daemon replied `ok:false` (or `doctor` found a failure), `2` daemon not
 reachable.
 
+### Shell completions
+
+zsh completions live in [`integrations/zsh/_woints`](integrations/zsh/_woints):
+subcommands, flags and the `--scope`, `--action` and `--axis` values. The Nix
+package installs them to `share/zsh/site-functions`, so a `nix profile` or
+home-manager install with `programs.zsh.enable` picks them up automatically.
+Elsewhere, copy the file into a directory on `fpath` before `compinit`:
+
+```zsh
+fpath=(~/.zsh/completions $fpath)   # contains _woints
+autoload -U compinit && compinit
+```
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/woints/config.toml` (`~/.config/woints/config.toml`), or
