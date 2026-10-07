@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/wochap/woints"
+
+[workspace.dependencies]
+woints-core = { path = "crates/core" }
+woints-hypr = { path = "crates/hypr" }
+woints-overlay = { path = "crates/overlay" }
+woints-a11y = { path = "crates/a11y" }
+woints-vision = { path = "crates/vision" }
+woints-input = { path = "crates/input" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+fontdue = "0.9"
+futures-core = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop", "xkbcommon"] }
+thiserror = "2"
+tiny-skia = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+proptest = "1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
