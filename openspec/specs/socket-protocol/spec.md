@@ -45,3 +45,28 @@ The `woints` binary SHALL map subcommands `hints [--scope S] [--action A]`, `can
 #### Scenario: Daemon not running
 - **WHEN** `woints status` runs with no daemon
 - **THEN** it prints `wointsd is not running (socket: <path>)` to stderr and exits 2
+
+### Requirement: act command
+The protocol SHALL support `{"cmd":"act","snapshot_id":N,"id":E,"action":"activate|focus|left|right|middle|double|hover"}`. The daemon resolves the element from its snapshot store and invokes the actuator chain without showing the overlay. Unknown snapshot ids or element ids SHALL yield `ok:false`.
+
+#### Scenario: Activate from snapshot
+- **WHEN** `snapshot` returned id 17 with element 3 tagged `activate` and `{"cmd":"act","snapshot_id":17,"id":3,"action":"activate"}` arrives
+- **THEN** the reply is `{"ok":true,"performed":"activate"}` and `DoAction` was called once
+
+#### Scenario: Expired snapshot
+- **WHEN** `act` references a snapshot id no longer in the store
+- **THEN** the reply is `{"ok":false,"error":"unknown snapshot 17"}`
+
+### Requirement: hints action parameter
+`hints` SHALL accept `action` (default `activate`); the session uses it when a label is matched. In M2 only `activate` and `focus` succeed; others return `NeedsPointer`.
+
+#### Scenario: Default action
+- **WHEN** `{"cmd":"hints","scope":"focused"}` arrives
+- **THEN** the session action is `activate`
+
+### Requirement: CLI act
+`woints act --snapshot N --id E [--action A]` SHALL map to the `act` command and print the result.
+
+#### Scenario: CLI
+- **WHEN** `woints act --snapshot 17 --id 3` runs
+- **THEN** it sends the `act` request and exits 0 on `ok:true`

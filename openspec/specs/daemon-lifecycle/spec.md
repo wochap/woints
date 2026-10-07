@@ -43,3 +43,17 @@ The repository SHALL provide a `flake.nix` with `devShells.default` (Rust stable
 #### Scenario: nix build
 - **WHEN** `nix build` runs
 - **THEN** `result/bin/woints` and `result/bin/wointsd` exist
+
+### Requirement: Collection stages in timings and bench
+`status.last_timings` and `woints bench` SHALL include the stages `collect.connect`, `collect.match`, `collect.extents`, `collect.filter`, plus `act` for the last action, alongside M1's stages.
+
+#### Scenario: Bench rows
+- **WHEN** `woints bench -n 20` runs on a GTK3 window
+- **THEN** the table has rows for all `collect.*` stages with p50 and p95, and total p50 is under 100 ms
+
+### Requirement: Provider status
+`status` SHALL report each registered provider with `available: bool` and the last error, and the last snapshot's pairing reason (`pid`, `fuzzy`, `no-a11y-app`, `frame-guess`) and `truncated` flag.
+
+#### Scenario: Status after collection
+- **WHEN** `status` runs after a `hints` on a Qt app
+- **THEN** it shows `atspi: available`, `paired: pid`, `used: collection`, `truncated: false`
