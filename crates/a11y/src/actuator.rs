@@ -9,6 +9,7 @@ use woints_core::profile::ToolkitProfile;
 use crate::conn::A11yConnection;
 use crate::dbus::{self, Obj};
 use crate::provider::SharedApps;
+use crate::rule::role;
 
 pub struct AtspiActuator {
     conn: Arc<A11yConnection>,
@@ -86,7 +87,7 @@ impl AtspiActuator {
         let (c, obj) = self.obj(element).await.ok()?;
         let mut bars = Vec::new();
         for ch in dbus::children(&c, &obj).await.ok()? {
-            if dbus::role_name(&c, &ch).await.ok()?.as_str() != "scroll bar" {
+            if dbus::role(&c, &ch).await.ok()? != role::SCROLL_BAR {
                 continue;
             }
             let (_, _, w, h) = dbus::extents(&c, &ch).await.ok()?;

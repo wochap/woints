@@ -12,7 +12,7 @@ use crate::rule::{is_interactive, is_web_content};
 /// What the walk needs to know about one node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeData<N> {
-    pub role: String,
+    pub role: u32,
     /// SHOWING and VISIBLE.
     pub showing: bool,
     pub children: Vec<N>,
@@ -36,7 +36,7 @@ pub const CONCURRENCY: usize = 16;
 pub struct Found<N> {
     pub node: N,
     pub parent: Option<N>,
-    pub role: String,
+    pub role: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,14 +84,14 @@ where
             visited += 1;
             let Some(d) = data else { continue };
             // The root frame itself is never a hint.
-            if depth > 0 && d.showing && is_interactive(&d.role) {
+            if depth > 0 && d.showing && is_interactive(d.role) {
                 found.push(Found {
                     node: n.clone(),
                     parent: parent.clone(),
-                    role: d.role.clone(),
+                    role: d.role,
                 });
             }
-            if (depth > 0 && !d.showing) || (limits.skip_web_content && is_web_content(&d.role)) {
+            if (depth > 0 && !d.showing) || (limits.skip_web_content && is_web_content(d.role)) {
                 continue;
             }
             next.extend(d.children.into_iter().map(|c| (c, Some(n.clone()))));
@@ -116,7 +116,13 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    type Tree = HashMap<u32, (&'static str, bool, Vec<u32>)>;
+    use crate::rule::role;
+
+    type Tree = HashMap<u32, (u32, bool, Vec<u32>)>;
+
+    const FRAME: u32 = 23;
+    const PANEL: u32 = 39;
+    const LABEL: u32 = 29;
 
     fn limits() -> WalkLimits {
         WalkLimits {
@@ -131,7 +137,7 @@ mod tests {
     async fn run(t: &Tree, l: WalkLimits) -> WalkResult<u32> {
         walk(0u32, l, |n| async move {
             t.get(&n).map(|(r, s, c)| NodeData {
-                role: (*r).to_owned(),
+                role: *r,
                 showing: *s,
                 children: c.clone(),
             })
@@ -141,15 +147,15 @@ mod tests {
 
     fn tree() -> Tree {
         HashMap::from([
-            (0, ("frame", true, vec![1, 2, 3])),
-            (1, ("push button", true, vec![])),
-            (2, ("panel", true, vec![4, 5, 9])),
-            (3, ("document web", true, vec![6])),
-            (4, ("entry", true, vec![])),
-            (5, ("panel", false, vec![7])),
-            (6, ("link", true, vec![])),
-            (7, ("push button", true, vec![])),
-            (9, ("label", true, vec![])),
+            (0, (FRAME, true, vec![1, 2, 3])),
+            (1, (role::PUSH_BUTTON, true, vec![])),
+            (2, (PANEL, true, vec![4, 5, 9])),
+            (3, (role::DOCUMENT_WEB, true, vec![6])),
+            (4, (role::ENTRY, true, vec![])),
+            (5, (PANEL, false, vec![7])),
+            (6, (role::LINK, true, vec![])),
+            (7, (role::PUSH_BUTTON, true, vec![])),
+            (9, (LABEL, true, vec![])),
         ])
     }
 
@@ -164,7 +170,7 @@ mod tests {
         assert_eq!(r.visited, 8);
         let entry = r.found.iter().find(|f| f.node == 4).unwrap();
         assert_eq!(entry.parent, Some(2));
-        assert_eq!(entry.role, "entry");
+        assert_eq!(entry.role, role::ENTRY);
     }
 
     #[tokio::test]

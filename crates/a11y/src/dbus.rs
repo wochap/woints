@@ -113,8 +113,9 @@ pub async fn children(c: &Connection, o: &Obj) -> zbus::Result<Vec<Obj>> {
     call(c, o, ACCESSIBLE, "GetChildren", &()).await.map(objs)
 }
 
-pub async fn role_name(c: &Connection, o: &Obj) -> zbus::Result<String> {
-    call(c, o, ACCESSIBLE, "GetRoleName", &()).await
+/// Numeric `AtspiRole`.
+pub async fn role(c: &Connection, o: &Obj) -> zbus::Result<u32> {
+    call(c, o, ACCESSIBLE, "GetRole", &()).await
 }
 
 /// Raw `GetState` words.

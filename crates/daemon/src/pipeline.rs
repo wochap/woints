@@ -276,7 +276,7 @@ impl ElementProvider for DemoProvider {
 /// elements for pointer-only targets), other actions skip containers and
 /// elements that do not support them.
 pub fn hintable(e: &Element, action: Action) -> bool {
-    let container = woints_a11y::rule::is_scroll_container(&e.role);
+    let container = woints_a11y::rule::is_scroll_container_name(&e.role);
     match action {
         Action::Scroll => container || e.caps.is_empty(),
         a => !container && e.actions.contains(&a),

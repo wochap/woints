@@ -18,7 +18,7 @@ use crate::conn::{A11yConnection, is_transport};
 use crate::dbus::{self, Obj};
 use crate::filter::{Candidate, ParentInfo, keep};
 use crate::pair::{AppInfo, FrameInfo, FrameReason, pick_app, pick_frame};
-use crate::rule::{MatchRule, has_state, is_web_content, state};
+use crate::rule::{MatchRule, has_state, is_web_content, role, role_name, state};
 use crate::walk::{self, NodeData, WalkLimits};
 
 /// Extra time allowed past the budget for in-flight replies before a phase is abandoned.
@@ -66,13 +66,13 @@ pub struct AtspiProvider {
 struct Pending {
     obj: Obj,
     parent: Option<Obj>,
-    role: Option<String>,
+    role: Option<u32>,
 }
 
 struct Read {
     obj: Obj,
     parent: Option<Obj>,
-    role: String,
+    role: u32,
     name: String,
     states: Vec<u32>,
     rect: (i32, i32, i32, i32),
@@ -81,7 +81,7 @@ struct Read {
 
 #[derive(Clone)]
 struct Ancestor {
-    role: String,
+    role: u32,
     states: Vec<u32>,
     rect: Option<(i32, i32, i32, i32)>,
     parent: Option<Obj>,
@@ -274,7 +274,7 @@ impl AtspiProvider {
         };
         let r = walk::walk(frame.clone(), limits, |o: Obj| async move {
             let (role, st, kids) = futures::join!(
-                dbus::role_name(c, &o),
+                dbus::role(c, &o),
                 dbus::state(c, &o),
                 dbus::children(c, &o)
             );
@@ -316,7 +316,7 @@ impl AtspiProvider {
             return Some(a.clone());
         }
         let (role, st, ext, parent) = futures::join!(
-            dbus::role_name(c, o),
+            dbus::role(c, o),
             dbus::state(c, o),
             dbus::extents(c, o),
             dbus::parent(c, o)
@@ -452,8 +452,8 @@ impl AtspiProvider {
             let fut = stream::iter(pending.into_iter().map(|p| async move {
                 let role_fut = async {
                     match &p.role {
-                        Some(r) => Ok(r.clone()),
-                        None => dbus::role_name(c, &p.obj).await,
+                        Some(r) => Ok(*r),
+                        None => dbus::role(c, &p.obj).await,
                     }
                 };
                 let (ext, st, role, name, ifaces) = futures::join!(
@@ -500,7 +500,7 @@ impl AtspiProvider {
         };
         let mut filters = base_filters();
         filters.extend(profile.phantom_filters.iter().cloned());
-        let needs_parent = |role: &str| role == "list item" || role == "menu item";
+        let needs_parent = |r: u32| r == role::LIST_ITEM || r == role::MENU_ITEM;
         let cache = Mutex::new(HashMap::new());
         let cands: Vec<Candidate> = {
             let (c, cache, global) = (&c, &cache, &global);
@@ -509,11 +509,11 @@ impl AtspiProvider {
                 .map(|r| async move {
                     let mut cand = Candidate {
                         rect: global(r.rect),
-                        role: r.role.clone(),
+                        role: role_name(r.role).to_owned(),
                         parent: None,
                         combo_expanded: None,
                     };
-                    if !needs_parent(&r.role) {
+                    if !needs_parent(r.role) {
                         return cand;
                     }
                     let mut next = match &r.parent {
@@ -527,11 +527,11 @@ impl AtspiProvider {
                         };
                         if level == 0 {
                             cand.parent = a.rect.map(|e| ParentInfo {
-                                role: a.role.clone(),
+                                role: role_name(a.role).to_owned(),
                                 rect: global(e),
                             });
                         }
-                        if a.role == "combo box" {
+                        if a.role == role::COMBO_BOX {
                             cand.combo_expanded = Some(has_state(&a.states, state::EXPANDED));
                             break;
                         }
@@ -551,11 +551,11 @@ impl AtspiProvider {
             .enumerate()
             .map(|(n, i)| {
                 let r = &reads[i];
-                let caps = atspi_caps(&r.role, &r.states, r.n_actions);
+                let caps = atspi_caps(r.role, &r.states, r.n_actions);
                 Element {
                     id: ElementId(n as u32 + 1),
                     rect: cands[i].rect,
-                    role: r.role.clone(),
+                    role: role_name(r.role).to_owned(),
                     name: r.name.clone(),
                     source: ElementSource::Atspi,
                     actions: Action::supported(&caps),
@@ -586,9 +586,9 @@ impl ElementProvider for AtspiProvider {
 
 /// `GrabFocus` (first) for text entries, `DoAction` when the element has
 /// actions, `Accessible` when neither applies.
-pub fn atspi_caps(role: &str, states: &[u32], n_actions: i32) -> Vec<AtspiCap> {
+pub fn atspi_caps(r: u32, states: &[u32], n_actions: i32) -> Vec<AtspiCap> {
     let mut v = Vec::new();
-    if role == "entry" || role == "password text" || has_state(states, state::EDITABLE) {
+    if r == role::ENTRY || r == role::PASSWORD_TEXT || has_state(states, state::EDITABLE) {
         v.push(AtspiCap::GrabFocus);
     }
     if n_actions > 0 {
@@ -621,9 +621,7 @@ async fn in_web_content(c: &Connection, o: &Obj) -> bool {
     let mut cur = dbus::parent(c, o).await.ok().flatten();
     for _ in 0..WEB_ANCESTOR_DEPTH {
         let Some(p) = cur else { return false };
-        if dbus::role_name(c, &p)
-            .await
-            .is_ok_and(|r| is_web_content(&r))
+        if dbus::role(c, &p).await.is_ok_and(is_web_content)
         {
             return true;
         }
@@ -665,14 +663,14 @@ mod tests {
     #[test]
     fn action_tags() {
         use AtspiCap::*;
-        assert_eq!(atspi_caps("push button", &[], 1), [DoAction]);
-        assert_eq!(atspi_caps("entry", &[], 1), [GrabFocus, DoAction]);
-        assert_eq!(atspi_caps("password text", &[], 0), [GrabFocus]);
+        assert_eq!(atspi_caps(role::PUSH_BUTTON, &[], 1), [DoAction]);
+        assert_eq!(atspi_caps(role::ENTRY, &[], 1), [GrabFocus, DoAction]);
+        assert_eq!(atspi_caps(role::PASSWORD_TEXT, &[], 0), [GrabFocus]);
         let editable = [1u32 << state::EDITABLE, 0];
-        assert_eq!(atspi_caps("combo box", &editable, 0), [GrabFocus]);
-        assert_eq!(atspi_caps("list item", &[], 0), [Accessible]);
+        assert_eq!(atspi_caps(role::COMBO_BOX, &editable, 0), [GrabFocus]);
+        assert_eq!(atspi_caps(role::LIST_ITEM, &[], 0), [Accessible]);
         assert_eq!(
-            Action::supported(&atspi_caps("push button", &[], 1)),
+            Action::supported(&atspi_caps(role::PUSH_BUTTON, &[], 1)),
             Action::ALL
         );
     }

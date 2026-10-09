@@ -29,6 +29,9 @@ pub mod role {
     pub const LINK: u32 = 88;
     pub const TREE_ITEM: u32 = 91;
     pub const LIST: u32 = 31;
+    pub const MENU: u32 = 33;
+    pub const SCROLL_BAR: u32 = 48;
+    pub const EMBEDDED: u32 = 78;
     pub const SCROLL_PANE: u32 = 49;
     pub const TREE: u32 = 65;
     pub const DOCUMENT_FRAME: u32 = 82;
@@ -69,55 +72,43 @@ pub const INTERACTIVE_ROLES: &[u32] = &[
     role::DOCUMENT_FRAME,
 ];
 
-/// Role names as returned by `GetRoleName`, same set as [`INTERACTIVE_ROLES`].
-pub const INTERACTIVE_ROLE_NAMES: &[&str] = &[
-    "push button",
-    "toggle button",
-    "link",
-    "entry",
-    "check box",
-    "radio button",
-    "combo box",
-    "menu item",
-    "check menu item",
-    "radio menu item",
-    "page tab",
-    "list item",
-    "tree item",
-    "spin button",
-    "slider",
-    "password text",
-    "scroll pane",
-    "list",
-    "tree",
-    "document web",
-    "document frame",
-];
-
 /// Scroll containers (design D18): collected with the interactive roles,
 /// hinted only by `scroll`.
-pub const SCROLL_CONTAINER_ROLE_NAMES: &[&str] = &[
-    "scroll pane",
-    "list",
-    "tree",
-    "document web",
-    "document frame",
+pub const SCROLL_CONTAINER_ROLES: &[u32] = &[
+    role::SCROLL_PANE,
+    role::LIST,
+    role::TREE,
+    role::DOCUMENT_WEB,
+    role::DOCUMENT_FRAME,
 ];
 
-pub fn is_scroll_container(role_name: &str) -> bool {
-    SCROLL_CONTAINER_ROLE_NAMES.contains(&role_name)
-}
-
 /// Roles whose subtrees are page content (design D19).
-pub const WEB_CONTENT_ROLE_NAMES: &[&str] =
-    &["document web", "document frame", "embedded", "web area"];
+pub const WEB_CONTENT_ROLES: &[u32] = &[role::DOCUMENT_WEB, role::DOCUMENT_FRAME, role::EMBEDDED];
 
-pub fn is_interactive(role_name: &str) -> bool {
-    INTERACTIVE_ROLE_NAMES.contains(&role_name)
+/// Canonical libatspi name of a role number, `unknown` when out of range.
+/// `atspi-common` 0.14 names 43 `button`; libatspi says `push button`.
+pub fn role_name(id: u32) -> &'static str {
+    match id {
+        role::PUSH_BUTTON => "push button",
+        _ => atspi_common::Role::try_from(id).map_or("unknown", |r| r.name()),
+    }
 }
 
-pub fn is_web_content(role_name: &str) -> bool {
-    WEB_CONTENT_ROLE_NAMES.contains(&role_name)
+pub fn is_interactive(role: u32) -> bool {
+    INTERACTIVE_ROLES.contains(&role)
+}
+
+pub fn is_scroll_container(role: u32) -> bool {
+    SCROLL_CONTAINER_ROLES.contains(&role)
+}
+
+/// [`is_scroll_container`] for a canonical role name carried on an element.
+pub fn is_scroll_container_name(name: &str) -> bool {
+    SCROLL_CONTAINER_ROLES.iter().any(|&r| role_name(r) == name)
+}
+
+pub fn is_web_content(role: u32) -> bool {
+    WEB_CONTENT_ROLES.contains(&role)
 }
 
 /// `AtspiCollectionMatchType`.
@@ -265,9 +256,31 @@ mod tests {
     }
 
     #[test]
-    fn role_lists_line_up() {
-        assert_eq!(INTERACTIVE_ROLES.len(), INTERACTIVE_ROLE_NAMES.len());
-        assert!(is_interactive("push button") && !is_interactive("label"));
-        assert!(is_web_content("document web"));
+    fn canonical_role_names() {
+        for (id, name) in [
+            (role::PUSH_BUTTON, "push button"),
+            (role::LIST_ITEM, "list item"),
+            (role::MENU_ITEM, "menu item"),
+            (role::COMBO_BOX, "combo box"),
+            (role::LIST, "list"),
+            (role::MENU, "menu"),
+            (role::SCROLL_BAR, "scroll bar"),
+            (role::DOCUMENT_WEB, "document web"),
+            (role::ENTRY, "entry"),
+            (role::PASSWORD_TEXT, "password text"),
+        ] {
+            assert_eq!(role_name(id), name);
+        }
+        assert_eq!(role_name(43), "push button");
+        assert_eq!(role_name(10_000), "unknown");
+    }
+
+    #[test]
+    fn role_predicates() {
+        assert!(is_interactive(role::PUSH_BUTTON) && !is_interactive(29));
+        assert!(!is_interactive(10_000));
+        assert!(is_web_content(role::DOCUMENT_WEB) && is_web_content(role::EMBEDDED));
+        assert!(is_scroll_container(role::LIST) && !is_scroll_container(role::LIST_ITEM));
+        assert!(is_scroll_container_name("scroll pane") && !is_scroll_container_name("list item"));
     }
 }

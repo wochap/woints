@@ -89,17 +89,17 @@ async fn main() {
     let (conn_r, web_r, si_r) = (&conn, &web, &showing_interactive);
     let r = walk::walk(frame.clone(), limits, |o: Obj| async move {
         let (role, st, kids) = futures::join!(
-            dbus::role_name(conn_r, &o),
+            dbus::role(conn_r, &o),
             dbus::state(conn_r, &o),
             dbus::children(conn_r, &o)
         );
         let role = role.ok()?;
         let st = st.ok()?;
-        if woints_a11y::rule::is_web_content(&role) {
+        if woints_a11y::rule::is_web_content(role) {
             web_r.lock().unwrap().push(o.clone());
         }
         let showing = has_state(&st, state::SHOWING) && has_state(&st, state::VISIBLE);
-        if showing && woints_a11y::rule::is_interactive(&role) {
+        if showing && woints_a11y::rule::is_interactive(role) {
             *si_r.lock().unwrap() += 1;
         }
         // Descend everything so hidden web content is counted too.
