@@ -150,10 +150,21 @@ pub async fn n_actions(c: &Connection, o: &Obj) -> zbus::Result<i32> {
     i32::try_from(v).map_err(zbus::Error::from)
 }
 
-/// Action names, in index order.
+pub async fn action_name(c: &Connection, o: &Obj, index: i32) -> zbus::Result<String> {
+    call(c, o, ACTION, "GetName", &(index,)).await
+}
+
+/// Action names, in index order, via `NActions` + `GetName` (WebKitGTK never
+/// answers `GetActions`). Capped at 16; unreadable names are empty.
 pub async fn action_names(c: &Connection, o: &Obj) -> zbus::Result<Vec<String>> {
-    let v: Vec<(String, String, String)> = call(c, o, ACTION, "GetActions", &()).await?;
-    Ok(v.into_iter().map(|(n, _, _)| n).collect())
+    let n = n_actions(c, o).await?.clamp(0, 16);
+    Ok(
+        futures::future::join_all((0..n).map(|i| action_name(c, o, i)))
+            .await
+            .into_iter()
+            .map(Result::unwrap_or_default)
+            .collect(),
+    )
 }
 
 pub async fn do_action(c: &Connection, o: &Obj, index: i32) -> zbus::Result<bool> {

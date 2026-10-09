@@ -1,6 +1,8 @@
 //! `AtspiActuator`: `DoAction`, `GrabFocus`, text and scrollbar reads (design D16, D21).
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use woints_core::model::{Action, AtspiCap, Element};
 use woints_core::ports::{ActError, Actuator, ScrollValue};
@@ -47,6 +49,39 @@ pub fn pick_action(names: &[String], preference: &[String]) -> i32 {
         .unwrap_or(0) as i32
 }
 
+/// Bound on every D-Bus call the actuator makes; measured replies are ~3 ms.
+const CALL_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Why a timed call produced no value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallError {
+    Timeout,
+    Dbus(String),
+}
+
+async fn timed<T>(fut: impl Future<Output = zbus::Result<T>>) -> Result<T, CallError> {
+    match tokio::time::timeout(CALL_TIMEOUT, fut).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(CallError::Dbus(e.to_string())),
+        Err(_) => Err(CallError::Timeout),
+    }
+}
+
+/// Maps the reply of the `GrabFocus`/`DoAction` call to the act result. A
+/// timed-out `DoAction` may already have run, so it never falls back to the
+/// pointer; a timed-out or refused `GrabFocus` does.
+pub fn outcome(p: Plan, reply: Result<bool, CallError>, action: Action) -> Result<(), ActError> {
+    match (reply, p) {
+        (Ok(true), _) => Ok(()),
+        (Ok(false) | Err(CallError::Timeout), Plan::GrabFocus) => {
+            Err(ActError::NeedsPointer(action))
+        }
+        (Ok(false), _) => Err(ActError::Failed(format!("{p:?} returned false"))),
+        (Err(CallError::Timeout), _) => Err(ActError::Failed(format!("{p:?} timed out"))),
+        (Err(CallError::Dbus(e)), _) => Err(ActError::Failed(e)),
+    }
+}
+
 impl AtspiActuator {
     pub fn new(conn: Arc<A11yConnection>, apps: SharedApps) -> Self {
         Self { conn, apps }
@@ -74,11 +109,11 @@ impl AtspiActuator {
     /// `Text.GetText(0, -1)`, falling back to `Accessible.Name`.
     pub async fn text(&self, element: &Element) -> Result<String, ActError> {
         let (c, obj) = self.obj(element).await?;
-        match dbus::text(&c, &obj).await {
+        match timed(dbus::text(&c, &obj)).await {
             Ok(t) if !t.is_empty() => Ok(t),
-            _ => dbus::name(&c, &obj)
+            _ => timed(dbus::name(&c, &obj))
                 .await
-                .map_err(|e| ActError::Failed(e.to_string())),
+                .map_err(|e| ActError::Failed(format!("{e:?}"))),
         }
     }
 
@@ -86,22 +121,23 @@ impl AtspiActuator {
     pub async fn scroll_value(&self, element: &Element) -> Option<ScrollValue> {
         let (c, obj) = self.obj(element).await.ok()?;
         let mut bars = Vec::new();
-        for ch in dbus::children(&c, &obj).await.ok()? {
-            if dbus::role(&c, &ch).await.ok()? != role::SCROLL_BAR {
+        for ch in timed(dbus::children(&c, &obj)).await.ok()? {
+            if timed(dbus::role(&c, &ch)).await.ok()? != role::SCROLL_BAR {
                 continue;
             }
-            let (_, _, w, h) = dbus::extents(&c, &ch).await.ok()?;
+            let (_, _, w, h) = timed(dbus::extents(&c, &ch)).await.ok()?;
             bars.push((h >= w, ch));
         }
         bars.sort_by_key(|(vertical, _)| !vertical);
         let (_, bar) = bars.into_iter().next()?;
-        let (current, min, max) = dbus::value(&c, &bar).await.ok()?;
+        let (current, min, max) = timed(dbus::value(&c, &bar)).await.ok()?;
         Some(ScrollValue { current, min, max })
     }
 }
 
 impl Actuator for AtspiActuator {
-    /// `GrabFocus` returning `false` yields [`ActError::NeedsPointer`] so the
+    /// Every call is bounded by [`CALL_TIMEOUT`]; see [`outcome`]. `GrabFocus`
+    /// returning `false` yields [`ActError::NeedsPointer`] so the
     /// caller falls back to a pointer click.
     async fn act(&self, element: &Element, action: Action) -> Result<(), ActError> {
         let p = plan(&element.caps, action);
@@ -109,22 +145,22 @@ impl Actuator for AtspiActuator {
             return Err(ActError::NeedsPointer(action));
         }
         let (c, obj) = self.obj(element).await?;
-        let ok = match p {
-            Plan::GrabFocus => dbus::grab_focus(&c, &obj).await,
+        let reply = match p {
+            Plan::GrabFocus => timed(dbus::grab_focus(&c, &obj)).await,
             Plan::DoAction => {
-                let names = dbus::action_names(&c, &obj).await.unwrap_or_default();
+                let names = timed(dbus::action_names(&c, &obj))
+                    .await
+                    .unwrap_or_default();
                 let i = pick_action(&names, &self.preference(&obj.bus));
                 tracing::debug!(element = %obj, ?names, index = i, "DoAction");
-                dbus::do_action(&c, &obj, i).await
+                timed(dbus::do_action(&c, &obj, i)).await
             }
             Plan::NeedsPointer => unreachable!(),
+        };
+        if reply == Err(CallError::Timeout) {
+            tracing::warn!(element = %obj, plan = ?p, "AT-SPI actuation timed out");
         }
-        .map_err(|e| ActError::Failed(e.to_string()))?;
-        match (ok, p) {
-            (true, _) => Ok(()),
-            (false, Plan::GrabFocus) => Err(ActError::NeedsPointer(action)),
-            (false, _) => Err(ActError::Failed(format!("{p:?} returned false"))),
-        }
+        outcome(p, reply, action)
     }
 }
 
@@ -172,5 +208,33 @@ mod tests {
         assert_eq!(plan(&[Accessible], Action::Click), Plan::NeedsPointer);
         assert_eq!(plan(&[], Action::Focus), Plan::NeedsPointer);
         assert_eq!(plan(&[DoAction], Action::Right), Plan::NeedsPointer);
+    }
+
+    #[test]
+    fn outcomes() {
+        let a = Action::Click;
+        let to = || Err(CallError::Timeout);
+        assert_eq!(outcome(Plan::DoAction, Ok(true), a), Ok(()));
+        assert!(matches!(
+            outcome(Plan::DoAction, to(), a),
+            Err(ActError::Failed(_))
+        ));
+        assert!(matches!(
+            outcome(Plan::DoAction, Ok(false), a),
+            Err(ActError::Failed(_))
+        ));
+        assert!(matches!(
+            outcome(Plan::DoAction, Err(CallError::Dbus("x".into())), a),
+            Err(ActError::Failed(_))
+        ));
+        assert_eq!(
+            outcome(Plan::GrabFocus, to(), a),
+            Err(ActError::NeedsPointer(a))
+        );
+        assert_eq!(
+            outcome(Plan::GrabFocus, Ok(false), a),
+            Err(ActError::NeedsPointer(a))
+        );
+        assert_eq!(outcome(Plan::GrabFocus, Ok(true), a), Ok(()));
     }
 }

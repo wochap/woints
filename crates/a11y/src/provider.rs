@@ -273,11 +273,8 @@ impl AtspiProvider {
             skip_web_content: profile.skip_web_content,
         };
         let r = walk::walk(frame.clone(), limits, |o: Obj| async move {
-            let (role, st, kids) = futures::join!(
-                dbus::role(c, &o),
-                dbus::state(c, &o),
-                dbus::children(c, &o)
-            );
+            let (role, st, kids) =
+                futures::join!(dbus::role(c, &o), dbus::state(c, &o), dbus::children(c, &o));
             let st = st.ok()?;
             Some(NodeData {
                 role: role.ok()?,
@@ -621,8 +618,7 @@ async fn in_web_content(c: &Connection, o: &Obj) -> bool {
     let mut cur = dbus::parent(c, o).await.ok().flatten();
     for _ in 0..WEB_ANCESTOR_DEPTH {
         let Some(p) = cur else { return false };
-        if dbus::role(c, &p).await.is_ok_and(is_web_content)
-        {
+        if dbus::role(c, &p).await.is_ok_and(is_web_content) {
             return true;
         }
         cur = dbus::parent(c, &p).await.ok().flatten();
