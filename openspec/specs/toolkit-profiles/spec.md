@@ -30,3 +30,18 @@ Profiles SHALL be plain data constructed in one module with unit tests, overrida
 #### Scenario: Unknown toolkit
 - **WHEN** toolkit name is unrecognised
 - **THEN** the default profile `[Collection, TreeWalk]`, no filters, `skip_web_content = false` applies
+
+### Requirement: WebKitGTK refinement
+`ToolkitProfile` SHALL provide a refinement applied after lookup when the paired application is detected as WebKitGTK (its process maps `libwebkit2gtk-4.*` or `libwebkitgtk-6.0`). The refinement SHALL set `skip_web_content = false` and enable web-root discovery; strategies, filters and action preference are unchanged. Detection SHALL happen once per application and be cached with the application facts.
+
+#### Scenario: Tauri app
+- **WHEN** a `gtk` 3.x application maps `libwebkit2gtk-4.1.so`
+- **THEN** its profile has `skip_web_content = false` and web-root discovery enabled
+
+#### Scenario: Plain GTK3 app
+- **WHEN** a `gtk` 3.x application maps no WebKit library
+- **THEN** the profile equals the plain GTK3 profile
+
+#### Scenario: Unknown pid
+- **WHEN** the application's pid is unknown or its maps cannot be read
+- **THEN** it is not treated as WebKitGTK

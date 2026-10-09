@@ -51,3 +51,14 @@ README SHALL contain a toolkit enablement table with the fix per toolkit and a c
 #### Scenario: Model present on CPU
 - **WHEN** the model loads on CPU
 - **THEN** doctor prints `model: <path> ok`, `input: [1,3,640,640]`, `ep: cpu (requested cpu)`, `warmup: <n> ms`, and the license line or `license: not found (warning)`
+
+### Requirement: WebKitGTK report
+For the focused window, `doctor` SHALL print whether the application is detected as WebKitGTK and, when it is, the number of web roots found and the web element count, with status `ok` when at least one web root was found and `warn` otherwise.
+
+#### Scenario: Tauri window
+- **WHEN** the focused window is a Tauri app with one web view
+- **THEN** doctor prints `ok  WebKitGTK: 1 web root, <n> web elements`
+
+#### Scenario: WebKitGTK without reachable web content
+- **WHEN** the app maps WebKitGTK but no web root is found
+- **THEN** doctor prints a `warn` line naming WebKitGTK and zero web roots

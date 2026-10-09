@@ -77,3 +77,44 @@ The provider and actuator SHALL identify every node's role with `org.a11y.atspi.
 #### Scenario: Unknown role number
 - **WHEN** a node returns a role number outside the AT-SPI enumeration
 - **THEN** its role name is `unknown` and it is not interactive
+
+### Requirement: WebKitGTK web-root discovery
+For an application detected as WebKitGTK, the provider SHALL find its web roots by descending from the selected frame breadth-first: a node at depth > 0 without SHOWING and VISIBLE SHALL NOT be descended except into children whose bus name differs from the application's bus name; once on a different bus, nodes SHALL be descended regardless of state for at most 4 levels, and the first node implementing `org.a11y.atspi.Collection` SHALL become a web root (not descended further). Every crossing SHALL yield at most one root, all crossings SHALL be collected, and discovery SHALL respect the collect deadline and the node budget. Object paths and bus-name prefixes SHALL NOT be used to recognise web nodes.
+
+#### Scenario: Tauri window
+- **WHEN** wodeo's frame is collected
+- **THEN** discovery passes the non-SHOWING WebKitWebView filler, crosses to the web process plug and returns the scroll pane as the single web root
+
+#### Scenario: Two web views
+- **WHEN** a window hosts two WebKit web views
+- **THEN** two web roots are returned
+
+#### Scenario: Not a WebKitGTK app
+- **WHEN** the application is not detected as WebKitGTK
+- **THEN** no discovery runs and collection is unchanged
+
+### Requirement: Web-root collection and merge
+For each web root the provider SHALL call `GetMatches` with the interactive rule and a count limit of 500, and SHALL merge the results with the elements found on the frame by the profile's strategy. When a crossing yields no Collection node within 4 levels, the provider SHALL walk from the cross-bus child, descending non-SHOWING nodes for its first 4 levels. For WebKitGTK apps the frame strategy SHALL NOT follow children on a bus other than the application's. `used` SHALL name the frame strategy with `+web` appended when web elements were found.
+
+#### Scenario: Web buttons collected
+- **WHEN** wodeo is collected
+- **THEN** the elements include push buttons `Play`, `Replace` and sliders `Trim start`, `Trim end`, and `used` is `collection+web`
+
+#### Scenario: Native menubar and web content
+- **WHEN** a Tauri app's frame Collection returns GTK menubar items and the web root returns page buttons
+- **THEN** both sets are present in the snapshot
+
+#### Scenario: Frame collection empty
+- **WHEN** a WebKitGTK app's frame `GetMatches` returns zero objects and the web root returns 11
+- **THEN** the snapshot has the web elements and the tree walk is not used for the frame
+
+### Requirement: Web-root extents offset
+For each web root the provider SHALL read WINDOW extents of the UI-side node whose child crossed the bus (the web view) and of the cross-bus child (the plug), and SHALL add `view.origin − plug.origin` to the WINDOW extents of every element collected from that root before converting to global coordinates. When either read fails the offset SHALL be zero.
+
+#### Scenario: Web view at the frame origin
+- **WHEN** the web view and the plug both report WINDOW origin `(0, 0)`
+- **THEN** web element rects are unchanged
+
+#### Scenario: Web view below a header bar
+- **WHEN** the web view reports WINDOW origin `(0, 46)` and the plug `(0, 0)`
+- **THEN** a web button reporting `(16, 818, 36, 37)` is placed at window `(16, 864, 36, 37)`
