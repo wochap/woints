@@ -161,6 +161,10 @@ pub struct FocusedFacts {
     pub root_children: Option<usize>,
     pub collection_count: Option<usize>,
     pub walk_count: Option<usize>,
+    /// The application maps WebKitGTK.
+    pub webkit: bool,
+    pub web_roots: Option<usize>,
+    pub web_count: Option<usize>,
     pub usable: usize,
     pub vision: (bool, String),
 }
@@ -197,6 +201,12 @@ pub fn focused_checks(f: &FocusedFacts) -> Vec<Check> {
     if let Some(n) = f.walk_count {
         out.push(Check::ok(format!("walk: {n} elements")));
     }
+    if f.webkit {
+        out.push(webkit_check(
+            f.web_roots.unwrap_or(0),
+            f.web_count.unwrap_or(0),
+        ));
+    }
     if f.paired.is_some() {
         let usable = format!("{} elements with usable extents", f.usable);
         out.push(if f.usable == 0 {
@@ -211,6 +221,20 @@ pub fn focused_checks(f: &FocusedFacts) -> Vec<Check> {
         if *run { "would run" } else { "would not run" }
     )));
     out
+}
+
+fn webkit_check(roots: usize, elements: usize) -> Check {
+    let plural = |n: usize, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    let m = format!(
+        "WebKitGTK: {}, {}",
+        plural(roots, "web root"),
+        plural(elements, "web element")
+    );
+    if roots == 0 {
+        Check::warn(m)
+    } else {
+        Check::ok(m)
+    }
 }
 
 /// Wayland globals woints uses; the first two are blocking.
@@ -291,6 +315,33 @@ mod tests {
         assert!(c.contains(&Check::warn(
             "Qt QML window: not reachable from AT-SPI root; use the Woints quickshell module or vision"
         )));
+    }
+
+    #[test]
+    fn webkit_line() {
+        let f = FocusedFacts {
+            toolkit: Some("GTK 3.24.52".into()),
+            paired: Some("pid".into()),
+            webkit: true,
+            web_roots: Some(1),
+            web_count: Some(11),
+            ..Default::default()
+        };
+        assert!(focused_checks(&f).contains(&Check::ok("WebKitGTK: 1 web root, 11 web elements")));
+        let none = FocusedFacts {
+            web_roots: Some(0),
+            web_count: Some(0),
+            ..f.clone()
+        };
+        assert!(
+            focused_checks(&none).contains(&Check::warn("WebKitGTK: 0 web roots, 0 web elements"))
+        );
+        let plain = FocusedFacts { webkit: false, ..f };
+        assert!(
+            !focused_checks(&plain)
+                .iter()
+                .any(|c| c.message.starts_with("WebKitGTK"))
+        );
     }
 
     #[test]

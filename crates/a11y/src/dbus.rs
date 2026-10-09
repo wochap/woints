@@ -140,6 +140,13 @@ pub async fn parent(c: &Connection, o: &Obj) -> zbus::Result<Option<Obj>> {
         .filter(|o| !o.is_null()))
 }
 
+pub async fn attributes(
+    c: &Connection,
+    o: &Obj,
+) -> zbus::Result<std::collections::HashMap<String, String>> {
+    call(c, o, ACCESSIBLE, "GetAttributes", &()).await
+}
+
 /// `Component.GetExtents(WINDOW)` as `(x, y, w, h)`.
 pub async fn extents(c: &Connection, o: &Obj) -> zbus::Result<(i32, i32, i32, i32)> {
     call(c, o, COMPONENT, "GetExtents", &(COORD_WINDOW,)).await
@@ -191,12 +198,14 @@ pub async fn value(c: &Connection, o: &Obj) -> zbus::Result<(f64, f64, f64)> {
     Ok((f(cur?)?, f(min?)?, f(max?)?))
 }
 
+/// `Collection.GetMatches`; `count` 0 is unlimited.
 pub async fn get_matches(
     c: &Connection,
     o: &Obj,
     rule: &crate::rule::MatchRule,
+    count: i32,
 ) -> zbus::Result<Vec<Obj>> {
-    let body = (rule, crate::rule::SORT_CANONICAL, 0i32, true);
+    let body = (rule, crate::rule::SORT_CANONICAL, count, true);
     call(c, o, COLLECTION, "GetMatches", &body).await.map(objs)
 }
 

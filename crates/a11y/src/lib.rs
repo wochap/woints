@@ -12,6 +12,7 @@ pub mod pair;
 pub mod provider;
 pub mod rule;
 pub mod walk;
+pub mod web;
 
 pub use actuator::AtspiActuator;
 pub use conn::{A11yConnection, BusInfo, bus_info};

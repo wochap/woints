@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use woints_a11y::dbus::{self, Obj};
 use woints_a11y::rule::{MatchRule, has_state, state};
 use woints_a11y::walk::{self, NodeData, WalkLimits};
+use woints_a11y::web::{self as webd, DiscoverLimits, WebNode};
 use woints_a11y::{A11yConnection, AtspiProvider};
 use woints_core::geom::OutputId;
 use woints_core::model::{Surface, Target};
@@ -50,8 +51,8 @@ async fn main() {
         .unwrap()
         .expect("no a11y app");
     println!(
-        "app {} {} {} paired {:?}",
-        app.name, app.toolkit, app.version, report.paired
+        "app {} {} {} paired {:?} webkit {}",
+        app.name, app.toolkit, app.version, report.paired, app.webkit
     );
 
     if register {
@@ -69,7 +70,7 @@ async fn main() {
     }
 
     let t = Instant::now();
-    let m = dbus::get_matches(&conn, &frame, &MatchRule::interactive()).await;
+    let m = dbus::get_matches(&conn, &frame, &MatchRule::interactive(), 0).await;
     println!(
         "GetMatches(frame): {:?} in {:.1} ms",
         m.as_ref().map(Vec::len),
@@ -84,6 +85,7 @@ async fn main() {
         concurrency: walk::CONCURRENCY,
         deadline: Instant::now() + Duration::from_secs(20),
         skip_web_content: false,
+        unpruned_depth: 0,
     };
     let t = Instant::now();
     let (conn_r, web_r, si_r) = (&conn, &web, &showing_interactive);
@@ -120,7 +122,53 @@ async fn main() {
     );
     let web = web.into_inner().unwrap();
     for w in &web {
-        let m = dbus::get_matches(&conn, w, &MatchRule::interactive()).await;
+        let m = dbus::get_matches(&conn, w, &MatchRule::interactive(), 0).await;
         println!("GetMatches(web node {w}): {:?}", m.as_ref().map(Vec::len));
+    }
+
+    let limits = DiscoverLimits {
+        max_nodes: 20_000,
+        concurrency: walk::CONCURRENCY,
+        deadline: Instant::now() + Duration::from_secs(20),
+    };
+    let t = Instant::now();
+    let d = webd::discover(frame.clone(), &app.bus_name, limits, |o: Obj, crossed| {
+        let conn = &conn;
+        async move {
+            let (st, ifaces, kids) = futures::join!(
+                dbus::state(conn, &o),
+                dbus::interfaces(conn, &o),
+                dbus::children(conn, &o)
+            );
+            let st = st.unwrap_or_default();
+            Some(WebNode {
+                showing: has_state(&st, state::SHOWING) && has_state(&st, state::VISIBLE),
+                has_collection: crossed && ifaces.ok()?.iter().any(|i| i == dbus::COLLECTION),
+                children: kids.unwrap_or_default(),
+            })
+        }
+    })
+    .await;
+    println!(
+        "web discovery: {} roots, visited {} truncated {} in {:.1} ms",
+        d.roots.len(),
+        d.visited,
+        d.truncated,
+        t.elapsed().as_secs_f64() * 1000.0
+    );
+    for r in &d.roots {
+        print!("  view {} crossing {} root ", r.view, r.crossing);
+        match &r.root {
+            Some(root) => {
+                let t = Instant::now();
+                let m = dbus::get_matches(&conn, root, &MatchRule::interactive(), 500).await;
+                println!(
+                    "{root}: GetMatches {:?} in {:.1} ms",
+                    m.as_ref().map(Vec::len),
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            None => println!("none"),
+        }
     }
 }

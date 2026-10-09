@@ -95,6 +95,9 @@ impl Daemon {
                         root_children: d.root_children,
                         collection_count: d.collection_count,
                         walk_count: d.walk_count,
+                        webkit: d.webkit,
+                        web_roots: d.web_roots,
+                        web_count: d.web_count,
                         usable: d.usable,
                         vision,
                     })

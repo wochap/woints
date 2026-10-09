@@ -25,6 +25,8 @@ pub struct WalkLimits {
     pub concurrency: usize,
     pub deadline: Instant,
     pub skip_web_content: bool,
+    /// Levels below the root whose hidden nodes are still descended.
+    pub unpruned_depth: usize,
 }
 
 pub const DEFAULT_MAX_NODES: usize = 1500;
@@ -91,7 +93,9 @@ where
                     role: d.role,
                 });
             }
-            if (depth > 0 && !d.showing) || (limits.skip_web_content && is_web_content(d.role)) {
+            if (depth >= limits.unpruned_depth.max(1) && !d.showing)
+                || (limits.skip_web_content && is_web_content(d.role))
+            {
                 continue;
             }
             next.extend(d.children.into_iter().map(|c| (c, Some(n.clone()))));
@@ -131,6 +135,7 @@ mod tests {
             concurrency: CONCURRENCY,
             deadline: Instant::now() + Duration::from_secs(5),
             skip_web_content: false,
+            unpruned_depth: 0,
         }
     }
 
@@ -180,6 +185,20 @@ mod tests {
         let r = run(&tree(), l).await;
         assert!(r.found.iter().all(|f| f.node != 6));
         assert_eq!(r.visited, 7);
+    }
+
+    #[tokio::test]
+    async fn unpruned_depth_descends_hidden_top() {
+        let mut t = tree();
+        // Hidden plug-like node above the content.
+        t.insert(0, (FRAME, true, vec![10]));
+        t.insert(10, (PANEL, false, vec![11]));
+        t.insert(11, (PANEL, true, vec![1]));
+        assert!(run(&t, limits()).await.found.is_empty());
+        let mut l = limits();
+        l.unpruned_depth = 4;
+        let ids: Vec<u32> = run(&t, l).await.found.iter().map(|f| f.node).collect();
+        assert_eq!(ids, [1]);
     }
 
     #[tokio::test]

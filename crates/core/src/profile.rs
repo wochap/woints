@@ -41,6 +41,9 @@ pub struct ToolkitProfile {
     pub strategies: Vec<Strategy>,
     pub phantom_filters: Vec<PhantomFilter>,
     pub skip_web_content: bool,
+    /// Discover and collect WebKitGTK web roots below the frame.
+    #[serde(default)]
+    pub web_roots: bool,
     pub action_preference: Vec<String>,
 }
 
@@ -67,6 +70,7 @@ impl Default for ToolkitProfile {
             strategies: vec![Strategy::Collection, Strategy::TreeWalk],
             phantom_filters: Vec::new(),
             skip_web_content: false,
+            web_roots: false,
             action_preference: DEFAULT_ACTION_PREFERENCE
                 .iter()
                 .map(|s| (*s).to_owned())
@@ -96,6 +100,19 @@ impl ToolkitProfile {
             _ => {}
         }
         p
+    }
+
+    /// Refinement for applications that map WebKitGTK: web content is the app.
+    pub fn webkit(mut self) -> Self {
+        self.skip_web_content = false;
+        self.web_roots = true;
+        self
+    }
+
+    /// [`lookup`](Self::lookup) plus the WebKitGTK refinement when `webkit`.
+    pub fn for_app(toolkit: &str, version: &str, class: &str, webkit: bool) -> Self {
+        let p = Self::lookup(toolkit, version, class);
+        if webkit { p.webkit() } else { p }
     }
 }
 
@@ -138,6 +155,28 @@ mod tests {
     #[test]
     fn electron_keeps_web_content() {
         assert!(!ToolkitProfile::lookup("Chromium", "", "Element").skip_web_content);
+    }
+
+    #[test]
+    fn webkit_refinement() {
+        let plain = ToolkitProfile::lookup("gtk", "3.24.52", "wodeo");
+        let tauri = ToolkitProfile::for_app("gtk", "3.24.52", "wodeo", true);
+        assert!(!tauri.skip_web_content);
+        assert!(tauri.web_roots);
+        assert_eq!(tauri.strategies, plain.strategies);
+        assert_eq!(tauri.phantom_filters, plain.phantom_filters);
+        assert_eq!(tauri.action_preference, plain.action_preference);
+        // Plain GTK3 and unknown pid (not detected) are the plain profile.
+        assert_eq!(
+            ToolkitProfile::for_app("gtk", "3.24.52", "wodeo", false),
+            plain
+        );
+        assert!(!plain.web_roots);
+        assert!(
+            !ToolkitProfile::lookup("Gecko", "140", "firefox")
+                .webkit()
+                .skip_web_content
+        );
     }
 
     #[test]

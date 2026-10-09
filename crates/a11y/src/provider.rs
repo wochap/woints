@@ -17,9 +17,10 @@ use woints_core::proto::ProviderStatus;
 use crate::conn::{A11yConnection, is_transport};
 use crate::dbus::{self, Obj};
 use crate::filter::{Candidate, ParentInfo, keep};
-use crate::pair::{AppInfo, FrameInfo, FrameReason, pick_app, pick_frame};
+use crate::pair::{AppInfo, FrameInfo, FrameReason, maps_has_webkit, pick_app, pick_frame};
 use crate::rule::{MatchRule, has_state, is_web_content, role, role_name, state};
 use crate::walk::{self, NodeData, WalkLimits};
+use crate::web::{self, DiscoverLimits, WebNode};
 
 /// Extra time allowed past the budget for in-flight replies before a phase is abandoned.
 const GRACE: Duration = Duration::from_millis(40);
@@ -27,6 +28,8 @@ const GRACE: Duration = Duration::from_millis(40);
 const COMBO_DEPTH: usize = 3;
 /// Ancestor depth checked when rejecting Collection matches inside web content.
 const WEB_ANCESTOR_DEPTH: usize = 40;
+/// `GetMatches` count limit per web root.
+const WEB_MATCH_LIMIT: i32 = 500;
 
 /// Applications by bus name, valid for one connection generation.
 #[derive(Default)]
@@ -52,6 +55,10 @@ pub struct Diagnosis {
     pub collection: Option<bool>,
     pub collection_count: Option<usize>,
     pub walk_count: Option<usize>,
+    /// The application maps WebKitGTK.
+    pub webkit: bool,
+    pub web_roots: Option<usize>,
+    pub web_count: Option<usize>,
     pub usable: usize,
 }
 
@@ -62,11 +69,21 @@ pub struct AtspiProvider {
     pub max_depth: usize,
 }
 
-/// Candidate before extents: object, parent if known, role if known.
+/// Candidate before extents: object, parent if known, role if known, and
+/// the WINDOW offset of its web root (zero for frame elements).
 struct Pending {
     obj: Obj,
     parent: Option<Obj>,
     role: Option<u32>,
+    offset: (i32, i32),
+}
+
+/// How the tree walk reads nodes.
+#[derive(Clone, Copy)]
+struct WalkOpts<'a> {
+    /// Children on another bus are dropped (WebKitGTK frames).
+    only_bus: Option<&'a str>,
+    unpruned_depth: usize,
 }
 
 struct Read {
@@ -219,7 +236,7 @@ impl AtspiProvider {
                 return None;
             }
         }
-        let found = match dbus::get_matches(c, frame, &MatchRule::interactive()).await {
+        let found = match dbus::get_matches(c, frame, &MatchRule::interactive(), 0).await {
             Ok(f) => f,
             Err(e) => {
                 report.reasons.push(format!("collection-error: {e}"));
@@ -252,6 +269,7 @@ impl AtspiProvider {
                     obj,
                     parent: None,
                     role: None,
+                    offset: (0, 0),
                 })
                 .collect(),
         )
@@ -262,6 +280,7 @@ impl AtspiProvider {
         c: &Connection,
         frame: &Obj,
         profile: &ToolkitProfile,
+        opts: WalkOpts<'_>,
         budget: Budget,
         report: &mut CollectReport,
     ) -> Vec<Pending> {
@@ -271,15 +290,20 @@ impl AtspiProvider {
             concurrency: walk::CONCURRENCY,
             deadline: budget.deadline,
             skip_web_content: profile.skip_web_content,
+            unpruned_depth: opts.unpruned_depth,
         };
         let r = walk::walk(frame.clone(), limits, |o: Obj| async move {
             let (role, st, kids) =
                 futures::join!(dbus::role(c, &o), dbus::state(c, &o), dbus::children(c, &o));
             let st = st.ok()?;
+            let mut children = kids.unwrap_or_default();
+            if let Some(bus) = opts.only_bus {
+                children.retain(|k| k.bus == bus);
+            }
             Some(NodeData {
                 role: role.ok()?,
                 showing: has_state(&st, state::SHOWING) && has_state(&st, state::VISIBLE),
-                children: kids.unwrap_or_default(),
+                children,
             })
         })
         .await;
@@ -299,8 +323,121 @@ impl AtspiProvider {
                 obj: f.node,
                 parent: f.parent,
                 role: Some(f.role),
+                offset: (0, 0),
             })
             .collect()
+    }
+
+    /// Walk options for the frame strategy of `app`.
+    fn frame_walk(app: &AppInfo) -> WalkOpts<'_> {
+        WalkOpts {
+            only_bus: app.webkit.then_some(app.bus_name.as_str()),
+            unpruned_depth: 0,
+        }
+    }
+
+    /// Discover the WebKitGTK web roots below `frame` and collect each one:
+    /// `GetMatches` on the root, or a walk from the crossing when no
+    /// Collection node was found. Returns the root count and the elements.
+    async fn web(
+        &self,
+        c: &Connection,
+        app: &AppInfo,
+        frame: &Obj,
+        profile: &ToolkitProfile,
+        budget: Budget,
+        report: &mut CollectReport,
+    ) -> (usize, Vec<Pending>) {
+        let limits = DiscoverLimits {
+            max_nodes: self.max_nodes,
+            concurrency: walk::CONCURRENCY,
+            deadline: budget.deadline,
+        };
+        let d = web::discover(
+            frame.clone(),
+            &app.bus_name,
+            limits,
+            |o: Obj, crossed| async move {
+                if crossed {
+                    let (ifaces, kids) =
+                        futures::join!(dbus::interfaces(c, &o), dbus::children(c, &o));
+                    Some(WebNode {
+                        showing: false,
+                        has_collection: ifaces.ok()?.iter().any(|i| i == dbus::COLLECTION),
+                        children: kids.unwrap_or_default(),
+                    })
+                } else {
+                    let (st, kids) = futures::join!(dbus::state(c, &o), dbus::children(c, &o));
+                    let st = st.ok()?;
+                    Some(WebNode {
+                        showing: has_state(&st, state::SHOWING) && has_state(&st, state::VISIBLE),
+                        has_collection: false,
+                        children: kids.unwrap_or_default(),
+                    })
+                }
+            },
+        )
+        .await;
+        tracing::debug!(
+            roots = d.roots.len(),
+            visited = d.visited,
+            truncated = d.truncated,
+            "web discovery"
+        );
+        report.truncated |= d.truncated;
+        if d.roots.is_empty() {
+            report.reasons.push("web-no-roots".into());
+            return (0, Vec::new());
+        }
+        let mut out = Vec::new();
+        for r in &d.roots {
+            let (view, plug) =
+                futures::join!(dbus::extents(c, &r.view), dbus::extents(c, &r.crossing));
+            let offset = match (view, plug) {
+                (Ok(v), Ok(p)) => (v.0 - p.0, v.1 - p.1),
+                _ => (0, 0),
+            };
+            let matched = match &r.root {
+                Some(root) => {
+                    if tracing::enabled!(tracing::Level::DEBUG) {
+                        let toolkit = dbus::attributes(c, root)
+                            .await
+                            .ok()
+                            .and_then(|a| a.get("toolkit").cloned());
+                        tracing::debug!(%root, ?toolkit, ?offset, "web root");
+                    }
+                    match dbus::get_matches(c, root, &MatchRule::interactive(), WEB_MATCH_LIMIT)
+                        .await
+                    {
+                        Ok(found) => Some(found),
+                        Err(e) => {
+                            report.reasons.push(format!("web-collection-error: {e}"));
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            match matched {
+                Some(found) => out.extend(found.into_iter().map(|obj| Pending {
+                    obj,
+                    parent: None,
+                    role: None,
+                    offset,
+                })),
+                None => {
+                    let opts = WalkOpts {
+                        only_bus: None,
+                        unpruned_depth: web::CROSS_DEPTH,
+                    };
+                    let walked = self
+                        .tree_walk(c, &r.crossing, profile, opts, budget, report)
+                        .await;
+                    out.extend(walked.into_iter().map(|p| Pending { offset, ..p }));
+                }
+            }
+        }
+        (d.roots.len(), out)
     }
 
     async fn ancestor(
@@ -349,7 +486,8 @@ impl AtspiProvider {
         d.paired = report.paired.filter(|p| p != "no-a11y-app");
         d.toolkit = report.toolkit;
         if let Some((app, frame)) = paired {
-            let profile = ToolkitProfile::lookup(&app.toolkit, &app.version, &target.class);
+            let profile =
+                ToolkitProfile::for_app(&app.toolkit, &app.version, &target.class, app.webkit);
             d.collection = dbus::interfaces(&c, &frame)
                 .await
                 .ok()
@@ -364,10 +502,17 @@ impl AtspiProvider {
             }
             let mut r = CollectReport::default();
             d.walk_count = Some(
-                self.tree_walk(&c, &frame, &profile, budget, &mut r)
+                self.tree_walk(&c, &frame, &profile, Self::frame_walk(&app), budget, &mut r)
                     .await
                     .len(),
             );
+            d.webkit = app.webkit;
+            if profile.web_roots {
+                let mut r = CollectReport::default();
+                let (roots, found) = self.web(&c, &app, &frame, &profile, budget, &mut r).await;
+                d.web_roots = Some(roots);
+                d.web_count = Some(found.len());
+            }
         }
         d.usable = self
             .collect_target(target, budget)
@@ -400,16 +545,37 @@ impl AtspiProvider {
             let Some((app, frame)) = self.pair(&c, generation, target, &mut report).await? else {
                 return Ok::<_, ProviderError>(None);
             };
-            let profile = ToolkitProfile::lookup(&app.toolkit, &app.version, &target.class);
+            let profile =
+                ToolkitProfile::for_app(&app.toolkit, &app.version, &target.class, app.webkit);
+            let web = if profile.web_roots {
+                self.web(&c, &app, &frame, &profile, budget, &mut report)
+                    .await
+                    .1
+            } else {
+                Vec::new()
+            };
             let mut pending = None;
-            for s in &profile.strategies {
+            let mut tried = None;
+            for (i, s) in profile.strategies.iter().enumerate() {
+                // An empty frame is expected when the page is the app.
+                if i > 0 && *s == Strategy::TreeWalk && !web.is_empty() {
+                    break;
+                }
+                tried = Some(*s);
                 pending = match s {
                     Strategy::Collection => {
                         self.collection(&c, &frame, &profile, &mut report).await
                     }
                     Strategy::TreeWalk => Some(
-                        self.tree_walk(&c, &frame, &profile, budget, &mut report)
-                            .await,
+                        self.tree_walk(
+                            &c,
+                            &frame,
+                            &profile,
+                            Self::frame_walk(&app),
+                            budget,
+                            &mut report,
+                        )
+                        .await,
                     ),
                 };
                 if pending.as_ref().is_some_and(|p| !p.is_empty()) {
@@ -417,7 +583,14 @@ impl AtspiProvider {
                     break;
                 }
             }
-            Ok(Some((profile, pending.unwrap_or_default())))
+            if !web.is_empty() {
+                if let Some(s) = tried {
+                    report.used = Some(format!("{}+web", s.as_str()));
+                }
+            }
+            let mut pending = pending.unwrap_or_default();
+            pending.extend(web);
+            Ok(Some((profile, pending)))
         })
         .await;
         timings.record("collect.match", t.elapsed());
@@ -465,8 +638,9 @@ impl AtspiProvider {
                 } else {
                     0
                 };
+                let (x, y, w, h) = ext.ok()?;
                 Some(Read {
-                    rect: ext.ok()?,
+                    rect: (x + p.offset.0, y + p.offset.1, w, h),
                     states: st.ok()?,
                     role: role.ok()?,
                     name: name.unwrap_or_default(),
@@ -605,12 +779,20 @@ async fn app_info(c: &Connection, root: Obj) -> AppInfo {
         dbus::prop_string(c, &app, dbus::APPLICATION, "Version"),
         dbus::pid_of(c, &root.bus)
     );
+    let pid = pid.ok();
+    let webkit = match pid {
+        Some(pid) => tokio::fs::read_to_string(format!("/proc/{pid}/maps"))
+            .await
+            .is_ok_and(|m| maps_has_webkit(&m)),
+        None => false,
+    };
     AppInfo {
         bus_name: root.bus,
         name: name.unwrap_or_default(),
         toolkit: toolkit.unwrap_or_default(),
         version: version.unwrap_or_default(),
-        pid: pid.ok(),
+        pid,
+        webkit,
     }
 }
 

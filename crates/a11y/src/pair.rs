@@ -11,6 +11,13 @@ pub struct AppInfo {
     pub toolkit: String,
     pub version: String,
     pub pid: Option<u32>,
+    /// The process maps WebKitGTK (Tauri, Epiphany, GNOME web views).
+    pub webkit: bool,
+}
+
+/// Whether `/proc/<pid>/maps` contents map WebKitGTK 4.x or 6.0.
+pub fn maps_has_webkit(maps: &str) -> bool {
+    maps.contains("libwebkit2gtk-4.") || maps.contains("libwebkitgtk-6.0")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +125,19 @@ mod tests {
             toolkit: "GTK".into(),
             version: "4.22".into(),
             pid,
+            webkit: false,
         }
+    }
+
+    #[test]
+    fn webkit_maps() {
+        let tauri = "7f1c-7f1d r-xp 00000000 00:1f 123 /nix/store/x-webkitgtk-2.52.4+abi=4.1/lib/libwebkit2gtk-4.1.so.0.19.4\n";
+        let epiphany = "7f1c-7f1d r--p 00000000 00:1f 9 /usr/lib/libwebkitgtk-6.0.so.4\n";
+        let gtk3 = "7f1c-7f1d r-xp 00000000 00:1f 7 /usr/lib/libgtk-3.so.0\n";
+        assert!(maps_has_webkit(tauri));
+        assert!(maps_has_webkit(epiphany));
+        assert!(!maps_has_webkit(gtk3));
+        assert!(!maps_has_webkit(""));
     }
 
     #[test]
