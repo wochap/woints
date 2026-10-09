@@ -32,7 +32,7 @@ AT-SPI element collection strategies, extents resolution and phantom filtering f
 - **THEN** the walk stops, returns what it has and the snapshot carries `truncated = true`
 
 ### Requirement: Web content pruning
-When the active toolkit profile sets `skip_web_content`, both strategies SHALL exclude the subtree of nodes with role `document web`, `document frame`, `embedded` or `web area`.
+When the active toolkit profile sets `skip_web_content`, both strategies SHALL exclude the subtree of nodes whose numeric role is document web (95), document frame (82) or embedded (78).
 
 #### Scenario: Firefox chrome only
 - **WHEN** Firefox is collected with `skip_web_content = true`
@@ -62,3 +62,18 @@ The provider SHALL record `collect.connect`, `collect.match`, `collect.extents` 
 #### Scenario: Timings present
 - **WHEN** a `hints` request completes on a GTK3 app
 - **THEN** `status.last_timings` contains all four `collect.*` stages and their sum is under 100 ms
+
+### Requirement: Numeric role identification
+The provider and actuator SHALL identify every node's role with `org.a11y.atspi.Accessible.GetRole` (numeric `AtspiRole`) and SHALL NOT call `GetRoleName` or `GetLocalizedRoleName` for any decision. The role string carried in `Element.role`, filter candidates and logs SHALL be the canonical AT-SPI name of that number, produced locally; an unknown number SHALL map to `unknown`.
+
+#### Scenario: Toolkit reports an empty role name
+- **WHEN** a WebKitGTK node returns `''` from `GetRoleName` and `43` from `GetRole`
+- **THEN** it is treated as interactive and its element role is `push button`
+
+#### Scenario: Toolkit reports a non-canonical role name
+- **WHEN** a GTK 3.24 title-bar button returns `'button'` from `GetRoleName` and `43` from `GetRole`
+- **THEN** the tree walk keeps it and its element role is `push button`
+
+#### Scenario: Unknown role number
+- **WHEN** a node returns a role number outside the AT-SPI enumeration
+- **THEN** its role name is `unknown` and it is not interactive
