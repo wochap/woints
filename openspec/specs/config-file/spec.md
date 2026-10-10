@@ -57,3 +57,24 @@ Unknown keys SHALL warn; `~` SHALL expand; the table SHALL reload on SIGHUP.
 #### Scenario: SIGHUP changes model path
 - **WHEN** `model_path` changes and SIGHUP is sent
 - **THEN** the session is rebuilt and warm-up runs again, logged as `onnx: reloaded`
+
+### Requirement: A11y config table
+`config.toml` SHALL accept:
+```toml
+[a11y]
+wake_chromium = true   # wake dormant Chromium/Electron accessibility trees
+wake_exclude  = []     # Hyprland classes never woken (glob, case-insensitive)
+```
+Missing keys SHALL take these defaults. The table SHALL reload on SIGHUP and `reload`, applying to the next request; applications already woken stay woken. Unknown keys in `[a11y]` SHALL warn.
+
+#### Scenario: Defaults
+- **WHEN** the config file has no `[a11y]` table
+- **THEN** `wake_chromium` is true and `wake_exclude` is empty
+
+#### Scenario: Wake disabled
+- **WHEN** the file sets `[a11y] wake_chromium = false`
+- **THEN** no dormant Chromium frame is woken and those windows get vision as before
+
+#### Scenario: Reload adds an exclusion
+- **WHEN** `wake_exclude = ["brave-browser"]` is added and `woints reload` runs
+- **THEN** the next request on a dormant `brave-browser` window makes no wake call

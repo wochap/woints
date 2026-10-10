@@ -118,3 +118,30 @@ For each web root the provider SHALL read WINDOW extents of the UI-side node who
 #### Scenario: Web view below a header bar
 - **WHEN** the web view reports WINDOW origin `(0, 46)` and the plug `(0, 0)`
 - **THEN** a web button reporting `(16, 818, 36, 37)` is placed at window `(16, 864, 36, 37)`
+
+### Requirement: Dormant Chromium wake
+When the paired application's toolkit is `Chromium` (case-insensitive) and the selected frame's children are all the null object (`/org/a11y/atspi/null`), the provider SHALL treat the frame as dormant. If `a11y.wake_chromium` is true and the target class matches no `a11y.wake_exclude` entry (case-insensitive glob), the provider SHALL call `org.a11y.atspi.Accessible.GetAttributes` on the frame and then poll the frame about every 50 ms until it has a non-null child and, when the frame implements Collection, the interactive rule matches at least one object and, when the profile keeps web content (no `skip_web_content`), a `document web` node below the frame has at least one child; the wait SHALL end after 1000 ms. The wake wait SHALL NOT count against the collection budget: collection SHALL start with a full budget after the wake ends. The provider SHALL record the stage `collect.wake` and SHALL remember per application (bus name) that it was woken, so later requests skip the wake. A dormant frame that was not woken (disabled or excluded) SHALL be collected as today and record reason `chromium-dormant`. A wake that ends without a non-null child SHALL record reason `chromium-wake-timeout`.
+
+#### Scenario: Electron app woken on first request
+- **WHEN** `hints` runs on Bruno (Electron) whose frame child is `/org/a11y/atspi/null` and the wake is enabled
+- **THEN** the provider calls `GetAttributes` on the frame, the tree appears within 1000 ms, the snapshot holds the app's interactive elements including web content, and `status.last_timings` contains `collect.wake`
+
+#### Scenario: Second request skips the wake
+- **WHEN** `hints` runs again on the same Bruno process
+- **THEN** no `GetAttributes` wake call is made and `collect.wake` is absent
+
+#### Scenario: Browser UI only
+- **WHEN** `hints` runs on a dormant `google-chrome` window with the wake enabled
+- **THEN** after the wake the elements include the toolbar buttons and the `Address and search bar` entry, and no element has a `document web` ancestor
+
+#### Scenario: Class excluded
+- **WHEN** `wake_exclude = ["google-chrome"]` and `hints` runs on a dormant `google-chrome` window
+- **THEN** no `GetAttributes` wake call is made and the report reasons contain `chromium-dormant`
+
+#### Scenario: Wake never completes
+- **WHEN** the app was started with `--disable-renderer-accessibility` and its frame child stays null for 1000 ms after the wake call
+- **THEN** the provider returns no elements and the report reasons contain `chromium-wake-timeout`
+
+#### Scenario: Not Chromium
+- **WHEN** the paired application's toolkit is `GTK`, `Qt` or `Gecko`
+- **THEN** no dormancy check and no wake call run

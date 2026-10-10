@@ -35,11 +35,15 @@ Diagnostic report of environment, accessibility, Wayland and quickshell readines
 - **THEN** no child process is spawned
 
 ### Requirement: Documented fixes
-README SHALL contain a toolkit enablement table with the fix per toolkit and a column marking each row `verified` (with date and version) or `TODO(verify)`: GTK3 (unset `NO_AT_BRIDGE`; `IsEnabled`/gsettings), GTK4 (works, walk only, WINDOW coords), Qt Widgets (`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`), Qt QML/quickshell (Woints module), Electron (`ACCESSIBILITY_ENABLED=1` verified to register with Electron 42; content population TODO(verify); `--force-renderer-accessibility` alternative), Chromium/Firefox (chrome only, web content skipped; Firefox SHOWING issue TODO(verify)), Flutter and Tauri (TODO(verify), not tested).
+README SHALL contain a toolkit enablement table with the fix per toolkit and a column marking each row `verified` (with date and version) or `TODO(verify)`: GTK3 (unset `NO_AT_BRIDGE`; `IsEnabled`/gsettings), GTK4 (works, walk only, WINDOW coords), Qt Widgets (`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`), Qt QML/quickshell (Woints module), Electron (`ACCESSIBILITY_ENABLED=1` to register; tree woken automatically by woints, verified with Electron 41.9.1; `[a11y] wake_exclude` to opt out), Chromium browsers (tree woken automatically, browser UI only, web content skipped for Vimium, verified with Chrome 150; about +20 MB per woken browser), Firefox (chrome only, web content skipped; SHOWING issue TODO(verify)), Flutter and Tauri (TODO(verify), not tested).
 
 #### Scenario: Table present
 - **WHEN** README is read
 - **THEN** every toolkit above has a row with a status column
+
+#### Scenario: Chromium rows verified
+- **WHEN** README is read
+- **THEN** the Electron and Chromium rows are marked `verified` with the date and version and mention the automatic wake and `wake_exclude`
 
 ### Requirement: ONNX doctor section
 `woints doctor` SHALL print an `onnx` section: build has feature yes/no; configured detector; model path exists; input shape and output names read from the model; EP requested vs active; warm-up time; license file line; and, when the model lacks metadata, the exact config keys needed.
@@ -73,3 +77,18 @@ For the focused window, `doctor` SHALL print whether the application is detected
 #### Scenario: Font missing
 - **WHEN** `hint.font = "NoSuchFont"`
 - **THEN** doctor prints `warn  font "NoSuchFont" not found; using embedded Atkinson Hyperlegible Mono` and the exit code is unaffected
+
+### Requirement: Chromium tree report
+When the focused window's toolkit is `Chromium`, `doctor` SHALL print the state of its accessible tree: `ok  Chromium tree: woken (<n> elements)` when the frame has a non-null child, `warn  Chromium tree: dormant (wake disabled)` or `warn  Chromium tree: dormant (class excluded)` when the wake does not apply, and `fail  Chromium tree: dormant after wake; the app may run with --disable-renderer-accessibility` when a wake attempt timed out. The doctor run SHALL perform the same wake as `hints`.
+
+#### Scenario: Woken Electron app
+- **WHEN** the focused window is Bruno and the wake succeeds
+- **THEN** doctor prints an `ok` line `Chromium tree: woken (<n> elements)` with n > 0
+
+#### Scenario: Excluded browser
+- **WHEN** the focused window is `google-chrome`, it is dormant and `wake_exclude` contains `google-chrome`
+- **THEN** doctor prints `warn  Chromium tree: dormant (class excluded)`
+
+#### Scenario: Wake blocked
+- **WHEN** the focused Chromium window stays dormant after the wake
+- **THEN** doctor prints the `fail` line naming `--disable-renderer-accessibility` and exits 1

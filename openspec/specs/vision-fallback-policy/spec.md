@@ -45,3 +45,18 @@ Vision SHALL respect a per-request budget `vision.budget_ms` (default 250). If c
 #### Scenario: Slow detection
 - **WHEN** detection has not finished by the deadline
 - **THEN** the pipeline proceeds with the partial detections and logs `vision_budget_exceeded`
+
+### Requirement: Failed Chromium wake skips vision
+When the AT-SPI report for a toplevel target carries reason `chromium-wake-timeout`, the pipeline SHALL NOT run vision for that target, regardless of the AT-SPI element count, unless `vision.mode` is `always` or the class matches `vision.force_classes`. The decision reason SHALL be `chromium_dormant`. A target whose report carries only `chromium-dormant` (wake disabled or class excluded) SHALL follow the normal policy.
+
+#### Scenario: Wake timed out
+- **WHEN** mode is `fallback`, the target is a toplevel and its AT-SPI report carries `chromium-wake-timeout` with zero elements
+- **THEN** vision does not run and the snapshot contains `"vision": {"ran": false, "reason": "chromium_dormant"}`
+
+#### Scenario: Excluded class falls back to vision
+- **WHEN** mode is `fallback`, the class is in `a11y.wake_exclude` and the report carries `chromium-dormant` with zero elements
+- **THEN** vision runs with reason `too_few_atspi`
+
+#### Scenario: Forced class still runs vision
+- **WHEN** the report carries `chromium-wake-timeout` and the class matches `vision.force_classes`
+- **THEN** vision runs with reason `forced_class`
