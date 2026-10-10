@@ -17,18 +17,30 @@ The overlay SHALL use `wp_fractional_scale_v1` (falling back to integer `wl_outp
 
 #### Scenario: Scale 2 output
 - **WHEN** a 1440×900 logical output reports preferred scale `240/120`
-- **THEN** the buffer is `2880×1800` and a 22×17 logical badge renders as 44×34 device px
+- **THEN** the buffer is `2880×1800` and a 24×21 logical badge renders as 48×42 device px
 
 #### Scenario: Scale changes while showing
 - **WHEN** a `preferred_scale` event arrives with a new value
 - **THEN** the overlay re-renders at the new scale before the next frame
 
 ### Requirement: Badge appearance
-Badges SHALL be drawn with `tiny-skia` as a filled rounded rect, a 1 px (device-scaled) stroke inset ½ px, and one text run in embedded Atkinson Hyperlegible Mono Bold using the `hint.*` tokens from the design (default theme Mocha: bg `#11111b`, fg `#cdd6f4`, border `#6c7086`, size 11, padding `[2,3]`, radius 3).
+Badges SHALL be drawn with `tiny-skia` as a filled rounded rect, a 1 px (device-scaled) stroke inset ½ px, and one text run in embedded Atkinson Hyperlegible Mono Bold using the `hint.*` tokens from the design (default theme Mocha: bg `#11111b`, fg `#cdd6f4`, border `#6c7086`, size 11, padding `[4,4]`, radius 3). The default badge height SHALL be 21 logical px (size 11 + 2 × padding 4 + 2 × border 1), matching a Vimium hint marker. When `hint.uppercase = true` (default) the label SHALL be drawn in capital letters; this changes only the drawn text, and filtering still matches typed keys by keycode.
 
 #### Scenario: Demo render
 - **WHEN** `hints` runs in demo mode on the focused window
 - **THEN** badges labelled with generated labels appear at the window's corners and centre, and a PNG dump of the buffer (debug flag `WOINTS_DUMP=path`) shows the expected pixel sizes
+
+#### Scenario: Default badge size
+- **WHEN** a two-glyph label is drawn with default settings at scale 1
+- **THEN** the badge is 24×21 logical px
+
+#### Scenario: Uppercase display
+- **WHEN** `hint.uppercase` is unset and the label is `as`
+- **THEN** the badge shows `AS`, and pressing the keys for `a` then `s` selects it
+
+#### Scenario: Lowercase opt-out
+- **WHEN** the config sets `[hint] uppercase = false`
+- **THEN** the badge shows `as`
 
 ### Requirement: Keyboard handling
 While showing, the overlay SHALL receive all keyboard input, map keycodes through the compositor-provided xkb keymap, forward key presses (keycode, keysym, utf8, modifiers) to the daemon, and unmap on Escape. When keyboard focus leaves the overlay while it is showing and does not move to another woints overlay surface, the overlay SHALL unmap and the daemon SHALL return to idle in every showing mode (hints, drag phase 1 and 2, scroll). Focus leaving a surface that woints itself removed SHALL NOT end the session.
