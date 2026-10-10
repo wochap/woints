@@ -60,6 +60,18 @@ pub struct CollectReport {
     pub truncated: bool,
 }
 
+/// Reason: a dormant Chromium frame was collected without a wake.
+pub const CHROMIUM_DORMANT: &str = "chromium-dormant";
+/// Reason: a Chromium frame stayed dormant after a wake attempt.
+pub const CHROMIUM_WAKE_TIMEOUT: &str = "chromium-wake-timeout";
+
+impl CollectReport {
+    /// A Chromium wake was attempted and the tree did not appear.
+    pub fn wake_failed(&self) -> bool {
+        self.reasons.iter().any(|r| r == CHROMIUM_WAKE_TIMEOUT)
+    }
+}
+
 /// Elements for one target plus the provider's own stage timings.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Collected {

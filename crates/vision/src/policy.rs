@@ -22,13 +22,15 @@ pub use woints_core::config::glob;
 
 /// Decide whether vision runs for one target. `atspi_count` is the number of
 /// usable AT-SPI elements; `other_served` whether any provider returned
-/// elements for it.
+/// elements for it; `wake_failed` whether a Chromium tree stayed dormant
+/// after a wake attempt.
 pub fn decide_vision(
     cfg: &VisionConfig,
     atspi_count: usize,
     class: &str,
     is_layer: bool,
     other_served: bool,
+    wake_failed: bool,
 ) -> Decision {
     match cfg.mode {
         VisionMode::Off => return Decision::skip("mode_off"),
@@ -37,6 +39,9 @@ pub fn decide_vision(
     }
     if cfg.force_classes.iter().any(|g| glob(g, class)) {
         return Decision::run("forced_class");
+    }
+    if wake_failed {
+        return Decision::skip("chromium_dormant");
     }
     if is_layer {
         return if other_served {
@@ -72,13 +77,14 @@ mod tests {
             "org.gnome.Nautilus",
             false,
             true,
+            false,
         );
         assert_eq!(d, Decision::skip("enough_atspi"));
     }
 
     #[test]
     fn too_few_atspi() {
-        let d = decide_vision(&cfg(VisionMode::Fallback), 2, "kitty", false, true);
+        let d = decide_vision(&cfg(VisionMode::Fallback), 2, "kitty", false, true, false);
         assert_eq!(d, Decision::run("too_few_atspi"));
     }
 
@@ -90,26 +96,40 @@ mod tests {
             "steamwebhelper",
             false,
             true,
+            false,
         );
         assert_eq!(d, Decision::run("forced_class"));
     }
 
     #[test]
     fn layer_without_provider() {
-        let d = decide_vision(&cfg(VisionMode::Fallback), 0, "", true, false);
+        let d = decide_vision(&cfg(VisionMode::Fallback), 0, "", true, false, false);
         assert_eq!(d, Decision::run("layer_without_provider"));
-        assert!(!decide_vision(&cfg(VisionMode::Fallback), 4, "", true, true).run);
+        assert!(!decide_vision(&cfg(VisionMode::Fallback), 4, "", true, true, false).run);
     }
 
     #[test]
     fn mode_always() {
-        assert!(decide_vision(&cfg(VisionMode::Always), 99, "foot", false, true).run);
+        assert!(decide_vision(&cfg(VisionMode::Always), 99, "foot", false, true, false).run);
     }
 
     #[test]
     fn mode_off() {
-        let d = decide_vision(&cfg(VisionMode::Off), 0, "steam", false, false);
+        let d = decide_vision(&cfg(VisionMode::Off), 0, "steam", false, false, false);
         assert_eq!(d, Decision::skip("mode_off"));
+    }
+
+    #[test]
+    fn chromium_dormant() {
+        let f = cfg(VisionMode::Fallback);
+        let d = decide_vision(&f, 0, "bruno", false, false, true);
+        assert_eq!(d, Decision::skip("chromium_dormant"));
+        let d = decide_vision(&f, 0, "steamwebhelper", false, false, true);
+        assert_eq!(d, Decision::run("forced_class"));
+        let d = decide_vision(&cfg(VisionMode::Always), 0, "bruno", false, false, true);
+        assert_eq!(d, Decision::run("mode_always"));
+        let d = decide_vision(&f, 0, "google-chrome", false, false, false);
+        assert_eq!(d, Decision::run("too_few_atspi"));
     }
 
     #[test]

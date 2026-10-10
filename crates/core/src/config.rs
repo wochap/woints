@@ -446,6 +446,37 @@ pub struct AppsConfig {
     pub force_vision_classes: Vec<String>,
 }
 
+/// `[a11y]`: AT-SPI collection settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct A11yConfig {
+    /// Wake dormant Chromium/Electron accessibility trees.
+    pub wake_chromium: bool,
+    /// Classes never woken (globs, case-insensitive).
+    pub wake_exclude: Vec<String>,
+}
+
+impl Default for A11yConfig {
+    fn default() -> Self {
+        Self {
+            wake_chromium: true,
+            wake_exclude: Vec::new(),
+        }
+    }
+}
+
+impl A11yConfig {
+    /// Whether a dormant Chromium window of `class` gets woken.
+    pub fn wakes(&self, class: &str) -> bool {
+        let class = class.to_lowercase();
+        self.wake_chromium
+            && !self
+                .wake_exclude
+                .iter()
+                .any(|g| glob(&g.to_lowercase(), &class))
+    }
+}
+
 /// Every config section with its defaults.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -462,6 +493,7 @@ pub struct Config {
     pub actions: ActionsConfig,
     pub providers: Providers,
     pub apps: AppsConfig,
+    pub a11y: A11yConfig,
 }
 
 impl Config {
@@ -854,6 +886,21 @@ mod tests {
         assert_eq!(i.default_action, Action::Right);
         assert!(i.restore_cursor);
         assert_eq!(l.config.vision_config().force_classes, ["steam*"]);
+    }
+
+    #[test]
+    fn a11y_table() {
+        let d = parse("").unwrap().config.a11y;
+        assert!(d.wake_chromium);
+        assert!(d.wake_exclude.is_empty());
+        let l = parse("[a11y]\nwake_exclude = [\"Google-*\"]\n").unwrap();
+        assert!(l.config.a11y.wake_chromium);
+        assert!(!l.config.a11y.wakes("google-chrome"));
+        assert!(l.config.a11y.wakes("brave-browser"));
+        let l = parse("[a11y]\nwake_chromium = false\nsparkle = 1\n").unwrap();
+        assert!(!l.config.a11y.wake_chromium);
+        assert!(!l.config.a11y.wakes("bruno"));
+        assert_eq!(l.warnings, ["a11y.sparkle: unknown key"]);
     }
 
     #[test]

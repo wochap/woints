@@ -118,7 +118,14 @@ pub fn cull_under_floating(
 /// decision per target, then capture → detect.
 pub trait VisionStage: Sync {
     /// Whether vision runs for `target` given `atspi` usable elements, and why.
-    fn decide(&self, atspi: usize, target: &Target, served: bool) -> (bool, &'static str);
+    /// `wake_failed`: the target's Chromium tree stayed dormant after a wake.
+    fn decide(
+        &self,
+        atspi: usize,
+        target: &Target,
+        served: bool,
+        wake_failed: bool,
+    ) -> (bool, &'static str);
     fn collect(
         &self,
         target: &Target,
@@ -131,7 +138,7 @@ pub trait VisionStage: Sync {
 pub struct NoVision;
 
 impl VisionStage for NoVision {
-    fn decide(&self, _: usize, _: &Target, _: bool) -> (bool, &'static str) {
+    fn decide(&self, _: usize, _: &Target, _: bool, _: bool) -> (bool, &'static str) {
         (false, "vision_unavailable")
     }
     async fn collect(&self, _: &Target, _: &[OutputGeom]) -> Result<Collected, ProviderError> {
@@ -184,13 +191,20 @@ impl Vision {
 
 #[cfg(feature = "vision")]
 impl VisionStage for Vision {
-    fn decide(&self, atspi: usize, target: &Target, served: bool) -> (bool, &'static str) {
+    fn decide(
+        &self,
+        atspi: usize,
+        target: &Target,
+        served: bool,
+        wake_failed: bool,
+    ) -> (bool, &'static str) {
         let d = woints_vision::decide_vision(
             self.provider.config(),
             atspi,
             &target.class,
             target.surface.is_layer(),
             served,
+            wake_failed,
         );
         (d.run, d.reason)
     }
@@ -602,9 +616,11 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
     // with zero items (an empty notification popup, a bar with nothing
     // mapped); only layers with no provider at all fall back to vision.
     let mut served: Vec<bool> = vec![false; targets.len()];
+    let mut wake_failed: Vec<bool> = vec![false; targets.len()];
     let mut reports = Vec::new();
     for (&i, (els, rep)) in top_idx.iter().zip(top_out) {
         served[i] = !els.is_empty();
+        wake_failed[i] = rep.wake_failed();
         per_target[i] = els;
         reports.push(rep);
     }
@@ -628,12 +644,14 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
     let mut vision_timings = Timings::default();
     let mut merge_ms = Duration::ZERO;
     let mut finals: Vec<Vec<Element>> = Vec::with_capacity(targets.len());
-    for ((target, atspi), served) in targets.iter().zip(per_target).zip(served) {
+    for (((target, atspi), served), wake_failed) in
+        targets.iter().zip(per_target).zip(served).zip(wake_failed)
+    {
         let usable = match action {
             Some(a) => atspi.iter().filter(|e| hintable(e, a)).count(),
             None => atspi.len(),
         };
-        let (run, reason) = vision.decide(usable, target, served);
+        let (run, reason) = vision.decide(usable, target, served, wake_failed);
         tracing::debug!(class = %target.class, usable, run, reason, "vision decision");
         if report.reason.is_empty() || run && !report.ran {
             report = VisionReport {
@@ -852,8 +870,16 @@ mod tests {
     }
 
     impl VisionStage for FakeVision {
-        fn decide(&self, atspi: usize, _: &Target, _: bool) -> (bool, &'static str) {
-            if atspi < self.min {
+        fn decide(
+            &self,
+            atspi: usize,
+            _: &Target,
+            _: bool,
+            wake_failed: bool,
+        ) -> (bool, &'static str) {
+            if wake_failed {
+                (false, "chromium_dormant")
+            } else if atspi < self.min {
                 (true, "too_few_atspi")
             } else {
                 (false, "enough_atspi")
@@ -928,6 +954,58 @@ mod tests {
         );
         let vb = o.scene.badges.iter().filter(|b| b.vision.is_some()).count();
         assert_eq!(vb, 1);
+    }
+
+    /// No elements, report carrying `reason`.
+    struct ReasonProvider(&'static str);
+
+    impl ElementProvider for ReasonProvider {
+        fn name(&self) -> &'static str {
+            "atspi"
+        }
+        async fn collect(&self, _: &Target, _: Budget) -> Result<Collected, ProviderError> {
+            Ok(Collected {
+                elements: Vec::new(),
+                report: CollectReport {
+                    provider: "atspi".into(),
+                    reasons: vec![self.0.into()],
+                    ..Default::default()
+                },
+                timings: Timings::default(),
+            })
+        }
+    }
+
+    async fn run_reason(reason: &'static str) -> Output {
+        run(
+            snap(Some(window(-1500, 100))),
+            Scope::Focused,
+            Some(Action::Click),
+            &Config::default(),
+            &Theme::default(),
+            Timings::default(),
+            &ReasonProvider(reason),
+            &NoLayers,
+            &FakeVision { min: 10 },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn wake_timeout_skips_vision() {
+        let o = run_reason(woints_core::ports::CHROMIUM_WAKE_TIMEOUT).await;
+        assert_eq!(
+            o.vision,
+            VisionReport {
+                ran: false,
+                reason: "chromium_dormant".into()
+            }
+        );
+        assert!(o.elements.is_empty());
+        let o = run_reason(woints_core::ports::CHROMIUM_DORMANT).await;
+        assert!(o.vision.ran);
+        assert_eq!(o.vision.reason, "too_few_atspi");
     }
 
     #[tokio::test]

@@ -33,26 +33,27 @@ Two Firefox windows open, both 1438×858; the ACTIVE frame is selected.
   via Collection; `collect.match` was ~45–50 ms because every match is checked
   for a web-content ancestor. Page content is left to Vimium.
 
-## Electron / Chromium — task 7.2
+## Electron / Chromium — measured 2026-10-10
 
-- Bitwarden (Electron, `ToolkitName = Chromium`, version `1.0`), launched by
-  the session with `ACCESSIBILITY_ENABLED=1` in its environment: the frame
-  has **no children** (walk visited 1 node, `GetMatches` 0). The provider
-  reports `collection-empty, walk-empty`.
-- Chrome PWA (`chrome-chat.openai.com__-Default`, Google Chrome): same, 1 node.
-- So `ACCESSIBILITY_ENABLED=1` alone does not populate Chromium's tree here.
-
-TODO(verify) — needs a GUI launch, not run by the implementer:
-
-```sh
-ACCESSIBILITY_ENABLED=1 element-desktop &
-cargo run -p woints-a11y --example probe -- Element
-pkill -f element-desktop
-element-desktop --force-renderer-accessibility &
-cargo run -p woints-a11y --example probe -- Element
-```
-
-Record visited / interactive / SHOWING counts for both launches.
+- Chromium and Electron apps register on the AT-SPI bus but keep the tree
+  dormant: the frame's only child is the null object `/org/a11y/atspi/null`
+  until Chromium's AX mode is on.
+- `org.a11y.atspi.Accessible.GetAttributes` on the frame turns it on.
+  Chromium's `AtkGetAttributes` calls `OnExtendedPropertiesUsedInWebContent()`,
+  which adds `kAXModeBasic` (`kNativeAPIs | kWebContents`); without
+  `kNativeAPIs` nothing below the top-level window is exposed.
+- Bruno (Electron 41.9.1, no launch flags): 2 → 165 nodes within 0.2 s.
+- Chrome 150: 3 → 240 nodes within 1 s. Browser UI only is kept
+  (`skip_web_content`); page content stays with Vimium.
+- `ACCESSIBILITY_ENABLED=1`, other env vars, gsettings and `ScreenReaderEnabled`
+  toggles only gate bridge registration; none of them wakes the tree.
+- `--disable-renderer-accessibility` blocks the wake; `doctor` reports
+  `fail  Chromium tree: dormant after wake`.
+- Cost: Chrome with one tab went from 512 to about 532 MB PSS; idle CPU
+  unchanged. The tree stays on for the app's lifetime.
+- woints wakes the frame on the first request per app (up to 1000 ms, outside
+  the collection budget); `[a11y] wake_exclude` or `wake_chromium = false`
+  opts out.
 
 ## GTK3, GTK4, Qt Widgets
 

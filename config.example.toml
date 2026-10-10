@@ -118,3 +118,10 @@ budget_ms = 250  # one `qs ipc call` fork takes 50–100 ms; killed on overrun
 [apps]
 disabled_classes     = []  # class globs never hinted
 force_vision_classes = []  # class globs that always get vision
+
+[a11y]
+# Chromium and Electron apps keep their accessibility tree off until asked.
+# Woints wakes it on the first request (one-time pause of up to 1 s per app);
+# a woken browser uses about 20 MB more memory for as long as it runs.
+wake_chromium = true  # wake dormant Chromium/Electron accessibility trees
+wake_exclude  = []    # class globs never woken (case-insensitive); they get vision

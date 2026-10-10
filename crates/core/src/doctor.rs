@@ -147,6 +147,29 @@ pub fn env_checks(get: impl Fn(&str) -> Option<String>) -> Vec<Check> {
         .collect()
 }
 
+/// Accessible tree state of a Chromium window after the wake phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromiumState {
+    /// The frame has children; `usize` usable elements.
+    Woken(usize),
+    Excluded,
+    Disabled,
+    TimedOut,
+}
+
+impl ChromiumState {
+    pub fn check(self) -> Check {
+        match self {
+            Self::Woken(n) => Check::ok(format!("Chromium tree: woken ({n} elements)")),
+            Self::Disabled => Check::warn("Chromium tree: dormant (wake disabled)"),
+            Self::Excluded => Check::warn("Chromium tree: dormant (class excluded)"),
+            Self::TimedOut => Check::fail(
+                "Chromium tree: dormant after wake; the app may run with --disable-renderer-accessibility",
+            ),
+        }
+    }
+}
+
 /// Focused-window lines from the AT-SPI facts collected for it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FocusedFacts {
@@ -166,6 +189,8 @@ pub struct FocusedFacts {
     pub web_roots: Option<usize>,
     pub web_count: Option<usize>,
     pub usable: usize,
+    /// Set when the toolkit is Chromium.
+    pub chromium: Option<ChromiumState>,
     pub vision: (bool, String),
 }
 
@@ -206,6 +231,9 @@ pub fn focused_checks(f: &FocusedFacts) -> Vec<Check> {
             f.web_roots.unwrap_or(0),
             f.web_count.unwrap_or(0),
         ));
+    }
+    if let Some(st) = f.chromium {
+        out.push(st.check());
     }
     if f.paired.is_some() {
         let usable = format!("{} elements with usable extents", f.usable);
@@ -341,6 +369,35 @@ mod tests {
             !focused_checks(&plain)
                 .iter()
                 .any(|c| c.message.starts_with("WebKitGTK"))
+        );
+    }
+
+    #[test]
+    fn chromium_lines() {
+        let at = |st| {
+            focused_checks(&FocusedFacts {
+                toolkit: Some("Chromium 150".into()),
+                paired: Some("pid".into()),
+                chromium: Some(st),
+                ..Default::default()
+            })
+        };
+        assert!(
+            at(ChromiumState::Woken(165))
+                .contains(&Check::ok("Chromium tree: woken (165 elements)"))
+        );
+        assert!(
+            at(ChromiumState::Excluded)
+                .contains(&Check::warn("Chromium tree: dormant (class excluded)"))
+        );
+        assert!(
+            at(ChromiumState::Disabled)
+                .contains(&Check::warn("Chromium tree: dormant (wake disabled)"))
+        );
+        let t = at(ChromiumState::TimedOut);
+        assert!(
+            t.iter().any(|c| c.level == Level::Fail
+                && c.message.contains("--disable-renderer-accessibility"))
         );
     }
 

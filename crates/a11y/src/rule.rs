@@ -157,6 +157,21 @@ impl MatchRule {
             invert: false,
         }
     }
+
+    /// Any `document web` node, whatever its state.
+    pub fn document_web() -> Self {
+        Self {
+            states: bitset(&[], 2),
+            states_match: MATCH_ALL,
+            attributes: HashMap::new(),
+            attributes_match: MATCH_ALL,
+            roles: bitset(&[role::DOCUMENT_WEB], 4),
+            roles_match: MATCH_ANY,
+            interfaces: Vec::new(),
+            interfaces_match: MATCH_ALL,
+            invert: false,
+        }
+    }
 }
 
 /// Bit test on a `GetState` reply (`au`, two words).

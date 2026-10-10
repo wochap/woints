@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use woints_core::config::ProviderMode;
 use woints_core::doctor::{
-    Check, FocusedFacts, Report, env_checks, focused_checks, wayland_checks,
+    Check, ChromiumState, FocusedFacts, Report, env_checks, focused_checks, wayland_checks,
 };
 use woints_core::ports::Budget;
 use woints_overlay::font::{EMBEDDED_FAMILY, ResolvedFont};
@@ -86,7 +86,8 @@ impl Daemon {
             ))],
             Provider::Atspi(p) => match p.diagnose(&target, budget()).await {
                 Ok(d) => {
-                    let vision = self.vision_decision(d.usable, &target).await;
+                    let wake_failed = d.chromium == Some(ChromiumState::TimedOut);
+                    let vision = self.vision_decision(d.usable, &target, wake_failed).await;
                     focused_checks(&FocusedFacts {
                         class: target.class.clone(),
                         pid: target.pid,
@@ -100,6 +101,7 @@ impl Daemon {
                         web_roots: d.web_roots,
                         web_count: d.web_count,
                         usable: d.usable,
+                        chromium: d.chromium,
                         vision,
                     })
                 }
@@ -269,7 +271,10 @@ mod tests {
         };
         let c = font_check(&found);
         assert_eq!(c.level, Level::Ok);
-        assert_eq!(c.message, "font: Iosevka Nerd Font 700 (/fonts/iosevka.ttf)");
+        assert_eq!(
+            c.message,
+            "font: Iosevka Nerd Font 700 (/fonts/iosevka.ttf)"
+        );
         let c = font_check(&ResolvedFont::embedded(EMBEDDED_FAMILY));
         assert_eq!(c.level, Level::Ok);
         assert_eq!(c.message, "font: embedded Atkinson Hyperlegible Mono");

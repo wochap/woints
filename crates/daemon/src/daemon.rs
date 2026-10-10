@@ -279,6 +279,9 @@ impl Daemon {
         config_path: Option<PathBuf>,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<OverlayEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
+        if let Provider::Atspi(p) = &provider {
+            p.set_wake(config.a11y.clone());
+        }
         #[cfg(feature = "vision")]
         let onnx = {
             let mut s = woints_vision::OnnxSlot::default();
@@ -360,6 +363,9 @@ impl Daemon {
         let alphabet_changed = old.theme.hint.alphabet != new.theme.hint.alphabet;
         let look_changed = old.theme != new.theme;
         let theme = new.theme.clone();
+        if let Provider::Atspi(p) = &self.provider {
+            p.set_wake(new.config.a11y.clone());
+        }
         self.set_settings(new);
         #[cfg(feature = "vision")]
         {
@@ -1347,7 +1353,12 @@ impl Daemon {
     }
 
     /// Vision decision for doctor's focused-window lines.
-    pub(crate) async fn vision_decision(&self, usable: usize, target: &Target) -> (bool, String) {
+    pub(crate) async fn vision_decision(
+        &self,
+        usable: usize,
+        target: &Target,
+        wake_failed: bool,
+    ) -> (bool, String) {
         #[cfg(feature = "vision")]
         {
             let d = woints_vision::decide_vision(
@@ -1356,12 +1367,13 @@ impl Daemon {
                 &target.class,
                 target.surface.is_layer(),
                 usable > 0,
+                wake_failed,
             );
             (d.run, d.reason.into())
         }
         #[cfg(not(feature = "vision"))]
         {
-            let _ = (usable, target);
+            let _ = (usable, target, wake_failed);
             (false, "vision_unavailable".into())
         }
     }

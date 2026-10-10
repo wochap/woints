@@ -1,6 +1,7 @@
 //! `AtspiProvider`: pairing, strategies, extents and filters (design D13–D19).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,9 +9,14 @@ use futures::StreamExt;
 use futures::stream;
 use zbus::Connection;
 
+use woints_core::config::A11yConfig;
+use woints_core::doctor::ChromiumState;
 use woints_core::geom::{Global, Rect, Size};
 use woints_core::model::{Action, AtspiCap, Element, ElementId, ElementSource, Target, Timings};
-use woints_core::ports::{Budget, CollectReport, Collected, ElementProvider, ProviderError};
+use woints_core::ports::{
+    Budget, CHROMIUM_DORMANT, CHROMIUM_WAKE_TIMEOUT, CollectReport, Collected, ElementProvider,
+    ProviderError,
+};
 use woints_core::profile::{Strategy, ToolkitProfile, base_filters};
 use woints_core::proto::ProviderStatus;
 
@@ -30,12 +36,20 @@ const COMBO_DEPTH: usize = 3;
 const WEB_ANCESTOR_DEPTH: usize = 40;
 /// `GetMatches` count limit per web root.
 const WEB_MATCH_LIMIT: i32 = 500;
+/// Longest wait for a dormant Chromium tree to appear.
+const WAKE_TIMEOUT: Duration = Duration::from_millis(1000);
+/// Poll interval while waiting for a woken Chromium tree.
+const WAKE_POLL: Duration = Duration::from_millis(50);
 
 /// Applications by bus name, valid for one connection generation.
 #[derive(Default)]
 pub struct AppCache {
     generation: u64,
     apps: HashMap<String, AppInfo>,
+    /// Chromium apps whose tree is known to be awake.
+    woken: HashSet<String>,
+    /// Chromium apps already warned about a failed wake.
+    warned: HashSet<String>,
 }
 
 impl AppCache {
@@ -60,11 +74,55 @@ pub struct Diagnosis {
     pub web_roots: Option<usize>,
     pub web_count: Option<usize>,
     pub usable: usize,
+    pub chromium: Option<ChromiumState>,
+}
+
+/// Result of the Chromium wake phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// The tree is awake (already, or after the wake).
+    Awake,
+    Excluded,
+    Disabled,
+    TimedOut,
+}
+
+/// Stop condition of the wake poll once the frame has a child: an
+/// interactive match (when Collection exists) and, for profiles that keep
+/// web content, a populated `document web` node.
+fn wake_ready(collection: bool, wait_web: bool, interactive: bool, web: bool) -> bool {
+    if !collection {
+        return true;
+    }
+    interactive && (!wait_web || web)
+}
+
+/// A `document web` node below `frame` has children.
+async fn web_populated(c: &Connection, frame: &Obj) -> bool {
+    let Ok(docs) = dbus::get_matches(c, frame, &MatchRule::document_web(), 1).await else {
+        return false;
+    };
+    match docs.first() {
+        Some(d) => dbus::children(c, d).await.is_ok_and(|k| !k.is_empty()),
+        None => false,
+    }
+}
+
+/// Whether a dormant Chromium window of `class` gets woken.
+fn wake_allowed(cfg: &A11yConfig, class: &str) -> Option<Wake> {
+    if !cfg.wake_chromium {
+        Some(Wake::Disabled)
+    } else if !cfg.wakes(class) {
+        Some(Wake::Excluded)
+    } else {
+        None
+    }
 }
 
 pub struct AtspiProvider {
     conn: Arc<A11yConnection>,
     apps: SharedApps,
+    wake: Mutex<A11yConfig>,
     pub max_nodes: usize,
     pub max_depth: usize,
 }
@@ -113,9 +171,15 @@ impl AtspiProvider {
         Self {
             conn,
             apps: Arc::default(),
+            wake: Mutex::default(),
             max_nodes: walk::DEFAULT_MAX_NODES,
             max_depth: walk::DEFAULT_MAX_DEPTH,
         }
+    }
+
+    /// Wake settings for the next request (`[a11y]`).
+    pub fn set_wake(&self, cfg: A11yConfig) {
+        *lock(&self.wake) = cfg;
     }
 
     pub fn connection(&self) -> Arc<A11yConnection> {
@@ -156,6 +220,8 @@ impl AtspiProvider {
             if cache.generation != generation {
                 cache.generation = generation;
                 cache.apps.clear();
+                cache.woken.clear();
+                cache.warned.clear();
                 watch_owners(c.clone(), self.apps.clone(), generation);
             }
             roots
@@ -216,6 +282,88 @@ impl AtspiProvider {
             report.paired = Some("frame-guess".into());
         }
         Ok(Some((app, frames[fi].clone())))
+    }
+
+    /// Wake a dormant Chromium frame (`GetAttributes` turns on Chromium's
+    /// AX mode) and wait for its tree. `None` when the app is not Chromium.
+    async fn wake(
+        &self,
+        c: &Connection,
+        app: &AppInfo,
+        frame: &Obj,
+        class: &str,
+        report: &mut CollectReport,
+        timings: &mut Timings,
+    ) -> Option<Wake> {
+        if !app.toolkit.eq_ignore_ascii_case("chromium") {
+            return None;
+        }
+        if lock(&self.apps).woken.contains(&app.bus_name) {
+            return Some(Wake::Awake);
+        }
+        // `children` drops the null object a dormant frame answers with.
+        let dormant = dbus::children(c, frame).await.is_ok_and(|k| k.is_empty());
+        if !dormant {
+            lock(&self.apps).woken.insert(app.bus_name.clone());
+            return Some(Wake::Awake);
+        }
+        let skip = wake_allowed(&lock(&self.wake), class);
+        if let Some(w) = skip {
+            report.reasons.push(CHROMIUM_DORMANT.into());
+            return Some(w);
+        }
+        // Electron keeps web content; its renderer tree arrives after the
+        // native views, so the wake waits for it too.
+        let wait_web = !ToolkitProfile::for_app(&app.toolkit, &app.version, class, app.webkit)
+            .skip_web_content;
+        let t = Instant::now();
+        let deadline = tokio::time::Instant::now() + WAKE_TIMEOUT;
+        let has_child = AtomicBool::new(false);
+        let poll = async {
+            let _ = dbus::attributes(c, frame).await;
+            let collection = dbus::interfaces(c, frame)
+                .await
+                .is_ok_and(|i| i.iter().any(|i| i == dbus::COLLECTION));
+            loop {
+                if !has_child.load(Ordering::Relaxed)
+                    && dbus::children(c, frame).await.is_ok_and(|k| !k.is_empty())
+                {
+                    has_child.store(true, Ordering::Relaxed);
+                }
+                if has_child.load(Ordering::Relaxed) {
+                    let interactive = !collection
+                        || dbus::get_matches(c, frame, &MatchRule::interactive(), 1)
+                            .await
+                            .is_ok_and(|m| !m.is_empty());
+                    let web = if wait_web && collection && interactive {
+                        web_populated(c, frame).await
+                    } else {
+                        false
+                    };
+                    if wake_ready(collection, wait_web, interactive, web) {
+                        return;
+                    }
+                }
+                tokio::time::sleep(WAKE_POLL).await;
+            }
+        };
+        let _ = tokio::time::timeout_at(deadline, poll).await;
+        timings.record("collect.wake", t.elapsed());
+        let mut cache = lock(&self.apps);
+        if has_child.load(Ordering::Relaxed) {
+            cache.woken.insert(app.bus_name.clone());
+            tracing::debug!(bus = %app.bus_name, ms = t.elapsed().as_millis() as u64, "chromium tree woken");
+            return Some(Wake::Awake);
+        }
+        report.reasons.push(CHROMIUM_WAKE_TIMEOUT.into());
+        if cache.warned.insert(app.bus_name.clone()) {
+            tracing::warn!(
+                bus = %app.bus_name,
+                class,
+                "chromium tree still dormant after wake; see woints doctor"
+            );
+        }
+        Some(Wake::TimedOut)
     }
 
     async fn collection(
@@ -472,6 +620,12 @@ impl AtspiProvider {
         target: &Target,
         budget: Budget,
     ) -> Result<Diagnosis, ProviderError> {
+        // Collect first: it runs the same wake as `hints`.
+        let span = budget.deadline.saturating_duration_since(Instant::now());
+        let (collected, wake) = self.collect_waking(target, budget).await;
+        let budget = Budget {
+            deadline: Instant::now() + span,
+        };
         let (c, generation) = self.conn.get().await?;
         let mut d = Diagnosis::default();
         let apps = self.apps(&c, generation).await?;
@@ -514,10 +668,13 @@ impl AtspiProvider {
                 d.web_count = Some(found.len());
             }
         }
-        d.usable = self
-            .collect_target(target, budget)
-            .await
-            .map_or(0, |c| c.elements.len());
+        d.usable = collected.map_or(0, |c| c.elements.len());
+        d.chromium = wake.map(|w| match w {
+            Wake::Awake => ChromiumState::Woken(d.usable),
+            Wake::Excluded => ChromiumState::Excluded,
+            Wake::Disabled => ChromiumState::Disabled,
+            Wake::TimedOut => ChromiumState::TimedOut,
+        });
         Ok(d)
     }
 
@@ -527,24 +684,72 @@ impl AtspiProvider {
         target: &Target,
         budget: Budget,
     ) -> Result<Collected, ProviderError> {
+        self.collect_waking(target, budget).await.0
+    }
+
+    /// [`Self::collect_target`] plus the Chromium wake result.
+    async fn collect_waking(
+        &self,
+        target: &Target,
+        mut budget: Budget,
+    ) -> (Result<Collected, ProviderError>, Option<Wake>) {
         let mut timings = Timings::default();
         let mut report = CollectReport {
             provider: "atspi".into(),
             ..Default::default()
         };
-        let hard = tokio::time::Instant::from_std(budget.deadline + GRACE);
+        let span = budget.deadline.saturating_duration_since(Instant::now());
+        let mut hard = tokio::time::Instant::from_std(budget.deadline + GRACE);
+        let empty = |report, timings| Collected {
+            elements: Vec::new(),
+            report,
+            timings,
+        };
 
         // collect.connect
         let t = Instant::now();
-        let (c, generation) = self.conn.get().await?;
+        let (c, generation) = match self.conn.get().await {
+            Ok(c) => c,
+            Err(e) => return (Err(e), None),
+        };
         timings.record("collect.connect", t.elapsed());
 
-        // collect.match
+        // collect.match (pairing)
+        let t = Instant::now();
+        let paired =
+            tokio::time::timeout_at(hard, self.pair(&c, generation, target, &mut report)).await;
+        let mut match_time = t.elapsed();
+        let (app, frame) = match paired {
+            Ok(Ok(Some(p))) => p,
+            Ok(Ok(None)) => {
+                timings.record("collect.match", match_time);
+                return (Ok(empty(report, timings)), None);
+            }
+            Ok(Err(e)) => return (Err(e), None),
+            Err(_) => {
+                timings.record("collect.match", match_time);
+                report.truncated = true;
+                report.reasons.push("match-timeout".into());
+                return (Ok(empty(report, timings)), None);
+            }
+        };
+
+        // collect.wake: outside the collection budget, which restarts after it.
+        let wake = self
+            .wake(&c, &app, &frame, &target.class, &mut report, &mut timings)
+            .await;
+        if timings.get("collect.wake").is_some() {
+            budget.deadline = Instant::now() + span;
+            hard = tokio::time::Instant::from_std(budget.deadline + GRACE);
+        }
+        if wake == Some(Wake::TimedOut) {
+            timings.record("collect.match", match_time);
+            return (Ok(empty(report, timings)), wake);
+        }
+
+        // collect.match (strategies)
         let t = Instant::now();
         let matched = tokio::time::timeout_at(hard, async {
-            let Some((app, frame)) = self.pair(&c, generation, target, &mut report).await? else {
-                return Ok::<_, ProviderError>(None);
-            };
             let profile =
                 ToolkitProfile::for_app(&app.toolkit, &app.version, &target.class, app.webkit);
             let web = if profile.web_roots {
@@ -590,28 +795,17 @@ impl AtspiProvider {
             }
             let mut pending = pending.unwrap_or_default();
             pending.extend(web);
-            Ok(Some((profile, pending)))
+            (profile, pending)
         })
         .await;
-        timings.record("collect.match", t.elapsed());
+        match_time += t.elapsed();
+        timings.record("collect.match", match_time);
         let (profile, pending) = match matched {
-            Ok(Ok(Some(p))) => p,
-            Ok(Ok(None)) => {
-                return Ok(Collected {
-                    elements: Vec::new(),
-                    report,
-                    timings,
-                });
-            }
-            Ok(Err(e)) => return Err(e),
+            Ok(p) => p,
             Err(_) => {
                 report.truncated = true;
                 report.reasons.push("match-timeout".into());
-                return Ok(Collected {
-                    elements: Vec::new(),
-                    report,
-                    timings,
-                });
+                return (Ok(empty(report, timings)), wake);
             }
         };
 
@@ -737,11 +931,14 @@ impl AtspiProvider {
             })
             .collect();
         timings.record("collect.filter", t.elapsed());
-        Ok(Collected {
-            elements,
-            report,
-            timings,
-        })
+        (
+            Ok(Collected {
+                elements,
+                report,
+                timings,
+            }),
+            wake,
+        )
     }
 }
 
@@ -827,7 +1024,10 @@ fn watch_owners(c: Connection, apps: SharedApps, generation: u64) {
             if cache.generation != generation {
                 return;
             }
-            if cache.apps.remove(args.name().as_str()).is_some() {
+            let bus = args.name().as_str();
+            cache.woken.remove(bus);
+            cache.warned.remove(bus);
+            if cache.apps.remove(bus).is_some() {
                 tracing::debug!(bus = %args.name(), "a11y app gone");
             }
         }
@@ -837,6 +1037,37 @@ fn watch_owners(c: Connection, apps: SharedApps, generation: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_stop_condition() {
+        // No Collection: a frame child is enough.
+        assert!(wake_ready(false, true, false, false));
+        // Browser: one interactive match is enough.
+        assert!(wake_ready(true, false, true, false));
+        assert!(!wake_ready(true, false, false, false));
+        // Electron: native views match before the renderer content exists.
+        assert!(!wake_ready(true, true, true, false));
+        assert!(wake_ready(true, true, true, true));
+    }
+
+    #[test]
+    fn wake_exclusion() {
+        let cfg = A11yConfig {
+            wake_chromium: true,
+            wake_exclude: vec!["Google-Chrome*".into()],
+        };
+        assert_eq!(wake_allowed(&cfg, "google-chrome"), Some(Wake::Excluded));
+        assert_eq!(
+            wake_allowed(&cfg, "GOOGLE-CHROME-beta"),
+            Some(Wake::Excluded)
+        );
+        assert_eq!(wake_allowed(&cfg, "bruno"), None);
+        let off = A11yConfig {
+            wake_chromium: false,
+            ..cfg
+        };
+        assert_eq!(wake_allowed(&off, "bruno"), Some(Wake::Disabled));
+    }
 
     #[test]
     fn action_tags() {

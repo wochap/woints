@@ -192,7 +192,12 @@ autoload -U compinit && compinit
 `wointsd --config PATH`. Every key is optional; [`config.example.toml`](config.example.toml)
 lists all defaults. Sections: `[hint]`, `[timing]`, `[chip]`, `[theme.mocha]`,
 `[theme.latte]`, `[keys]`, `[scope]`, `[vision]`, `[merge]`, `[input]`,
-`[actions]`, `[providers.quickshell]`, `[apps]`.
+`[actions]`, `[providers.quickshell]`, `[apps]`, `[a11y]`.
+
+- `[a11y]`: `wake_chromium = true` wakes dormant Chromium/Electron
+  accessibility trees on the first request; `wake_exclude` lists class globs
+  (case-insensitive) never woken, which get vision instead. Set
+  `wake_chromium = false` to turn the wake off.
 
 - Reload with `woints reload` or `pkill -HUP wointsd`. A file that fails
   validation is rejected with the key named (`theme.mocha.bg: expected
@@ -354,8 +359,8 @@ desktop (`detect.onnx` p50/p95).
 | GTK4 | works out of the box; no Collection, tree walk only; `WINDOW` coordinates | verified 2026-10-06, GTK 4.22 |
 | Qt Widgets | `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` | verified 2026-10-06, Qt 6.11 |
 | Qt QML / quickshell | not reachable over AT-SPI (windows never attach to the app root); import the [Woints module](integrations/quickshell/README.md), else vision | verified negative 2026-10-06, quickshell 0.3.1 / Qt 6.11; module TODO(verify) |
-| Electron | `ACCESSIBILITY_ENABLED=1` (or `--force-renderer-accessibility`) | registration verified 2026-10-06, Electron 42; content population TODO(verify) |
-| Chromium | browser chrome only, web content skipped (use Vimium); `--force-renderer-accessibility` | TODO(verify) |
+| Electron | `ACCESSIBILITY_ENABLED=1` to register; woints wakes the dormant tree automatically on the first request (up to 1 s once per app); opt out per class with `[a11y] wake_exclude` | verified 2026-10-10, Electron 41.9.1 (Bruno) |
+| Chromium browsers | tree woken automatically; browser UI only (toolbar, tabs, omnibox, bookmarks), web content skipped (use Vimium); about +20 MB memory per woken browser; opt out with `[a11y] wake_exclude` | verified 2026-10-10, Chrome 150 |
 | Firefox | browser chrome via Collection, web content skipped (use Vimium); page content never SHOWING | verified 2026-10-06, Gecko 152 (chrome); SHOWING issue TODO(verify) |
 | Flutter | not tested | TODO(verify) |
 | Tauri (WebKitGTK) | not tested | TODO(verify) |
