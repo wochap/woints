@@ -585,10 +585,11 @@ mod tests {
         assert!(count_color(BadgeStyle::Normal, 0, t.bg) > 0);
     }
 
-    fn badge_pixels(scale: f32) -> (u32, u32) {
-        let theme = Theme::default();
+    fn badge_scene(uppercase: bool) -> Scene {
+        let mut theme = Theme::default();
+        theme.hint.uppercase = uppercase;
         let s = badge_size(2, &theme.hint);
-        let scene = Scene {
+        Scene {
             outputs: vec![],
             badges: vec![Badge {
                 label: "as".into(),
@@ -602,10 +603,21 @@ mod tests {
             pinned: None,
             scroll: None,
             theme,
-        };
-        let pm = Renderer::new().render(&scene, &output(scale));
+        }
+    }
+
+    fn badge_pixels(scale: f32) -> (u32, u32) {
+        let pm = Renderer::new().render(&badge_scene(true), &output(scale));
         let (_, _, w, h) = bbox(&pm);
         (w, h)
+    }
+
+    #[test]
+    fn default_label_is_uppercase() {
+        assert!(Theme::default().hint.uppercase);
+        let upper = Renderer::new().render(&badge_scene(true), &output(1.0));
+        let lower = Renderer::new().render(&badge_scene(false), &output(1.0));
+        assert_ne!(upper.data(), lower.data());
     }
 
     /// Vision badge at `scale`: (vision-coloured pixels, border-coloured pixels).
@@ -669,9 +681,9 @@ mod tests {
 
     #[test]
     fn two_glyph_badge_device_sizes() {
-        assert_eq!(badge_pixels(1.0), (22, 17));
-        assert_eq!(badge_pixels(1.5), (33, 26));
-        assert_eq!(badge_pixels(2.0), (44, 34));
+        assert_eq!(badge_pixels(1.0), (24, 21));
+        assert_eq!(badge_pixels(1.5), (36, 32));
+        assert_eq!(badge_pixels(2.0), (48, 42));
     }
 
     #[test]

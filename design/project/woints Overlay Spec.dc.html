@@ -56,10 +56,10 @@ a{color:var(--color-accent-300)}a:hover{color:var(--color-accent-200)}
     <div style="display:grid;grid-template-columns:130px 1fr;gap:7px 14px;font:400 12.5px/1.4 var(--font-body);color:var(--color-neutral-300);flex:1">
       <span style="font-family:var(--hfont);color:var(--color-text)">hint.font</span><span>Atkinson Hyperlegible Mono Bold (OFL). Distinct a/d/g/q, open counters. Fallback JetBrains Mono Bold.</span>
       <span style="font-family:var(--hfont);color:var(--color-text)">hint.size</span><span>11 px logical (em box). Floor <b style="color:var(--color-text);font-weight:500">10 px</b>; below that, use bigger badges, not smaller text.</span>
-      <span style="font-family:var(--hfont);color:var(--color-text)">hint.padding</span><span>[2, 3] — y, x. Height = size + 2·pad-y + 2·border = 17.</span>
+      <span style="font-family:var(--hfont);color:var(--color-text)">hint.padding</span><span>[4, 4] — y, x. Height = size + 2·pad-y + 2·border = 21.</span>
       <span style="font-family:var(--hfont);color:var(--color-text)">hint.radius</span><span>3 px. Fill rect then stroke rect inset ½ px.</span>
       <span style="font-family:var(--hfont);color:var(--color-text)">border</span><span>1 device px at &lt;2×, floor(scale) above. Never fractional.</span>
-      <span style="font-family:var(--hfont);color:var(--color-text)">labels</span><span>Home row <span style="font-family:var(--hfont)">asdfghjkl</span>, 1–3 glyphs, prefix-free. Lowercase default; <span style="font-family:var(--hfont)">hint.uppercase = true</span> toggles.</span>
+      <span style="font-family:var(--hfont);color:var(--color-text)">labels</span><span>Home row <span style="font-family:var(--hfont)">asdfghjkl</span>, 1–3 glyphs, prefix-free. Uppercase default; <span style="font-family:var(--hfont)">hint.uppercase = false</span> toggles.</span>
       <span style="font-family:var(--hfont);color:var(--color-text)">shadow</span><span>None. Separation comes from the 1 px border.</span>
     </div>
   </div>
@@ -543,7 +543,7 @@ function fmt(r){return r.toFixed(1)+':1';}
 
 function buildToml(){
   const L=[];
-  L.push('# woints — hint overlay','[hint]','font         = "Atkinson Hyperlegible Mono"','font_weight  = 700','size         = 11        # logical px, × output scale, rounded','min_size     = 10','size_unit    = "logical" # or "mm"','size_mm      = 3.0       # used when size_unit = "mm"','padding      = [2, 3]    # [y, x] logical px','radius       = 3','border_width = 1         # device px = max(1, floor(scale))','offset       = [-3, -3]  # from target top-left','gap          = 2         # min space between badges','center_below = 20        # targets smaller than this are centred','alphabet     = "asdfghjkl"','uppercase    = false','eliminated   = "hide"    # "hide" | "fade"','outline      = false','outline_width = 1','vision_dash  = [2, 2]','theme        = "mocha"   # "mocha" | "latte"','','[timing]','appear_ms = 0','fade_ms   = 60','flash_ms  = 80            # hard cap 120','','[chip]','corner = "bottom-right"','inset  = 12','height = 22','');
+  L.push('# woints — hint overlay','[hint]','font         = "Atkinson Hyperlegible Mono"','font_weight  = 700','size         = 11        # logical px, × output scale, rounded','min_size     = 10','size_unit    = "logical" # or "mm"','size_mm      = 3.0       # used when size_unit = "mm"','padding      = [4, 4]    # [y, x] logical px','radius       = 3','border_width = 1         # device px = max(1, floor(scale))','offset       = [-3, -3]  # from target top-left','gap          = 2         # min space between badges','center_below = 20        # targets smaller than this are centred','alphabet     = "asdfghjkl"','uppercase    = true','eliminated   = "hide"    # "hide" | "fade"','outline      = false','outline_width = 1','vision_dash  = [2, 2]','theme        = "mocha"   # "mocha" | "latte"','','[timing]','appear_ms = 0','fade_ms   = 60','flash_ms  = 80            # hard cap 120','','[chip]','corner = "bottom-right"','inset  = 12','height = 22','');
   const pad = k => ('hint.'+k).padEnd(17);
   L.push('[theme.mocha]   # Catppuccin Mocha'); KEYS.forEach(k=>L.push(`${pad(k)}= "${MOCHA[k]}"  # ${MOCHA_N[k]}`));
   L.push('','[theme.latte]   # Catppuccin Latte'); KEYS.forEach(k=>L.push(`${pad(k)}= "${LATTE[k]}"  # ${LATTE_N[k]}`));

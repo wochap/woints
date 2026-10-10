@@ -9,13 +9,13 @@ size         = 11        # logical px, × output scale, rounded
 min_size     = 10
 size_unit    = "logical" # or "mm"
 size_mm      = 3.0       # used when size_unit = "mm"
-padding      = [2, 3]    # [y, x] logical px
+padding      = [4, 4]    # [y, x] logical px
 radius       = 3
 border_width = 1         # device px = max(1, floor(scale))
 offset       = [-3, -3]  # from target top-left
 gap          = 2         # min space between badges
 center_below = 20        # targets smaller than this are centred
-uppercase    = false
+uppercase    = true
 eliminated   = "hide"    # "hide" | "fade"
 prefix_style = "highlight-matched" # or "dim-matched"
 outline      = false

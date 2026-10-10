@@ -167,9 +167,9 @@ mod tests {
     const OUT: Size = Size { w: 1920, h: 1080 };
 
     #[test]
-    fn two_glyph_badge_is_22x17() {
-        assert_eq!(badge_size(2, &hint()), Size { w: 22, h: 17 });
-        assert_eq!(badge_size(1, &hint()), Size { w: 15, h: 17 });
+    fn two_glyph_badge_is_24x21() {
+        assert_eq!(badge_size(2, &hint()), Size { w: 24, h: 21 });
+        assert_eq!(badge_size(1, &hint()), Size { w: 17, h: 21 });
     }
 
     #[test]
@@ -259,7 +259,7 @@ mod tests {
         let s = badge_size(2, &hint());
         let inputs: Vec<_> = (0..12)
             .map(|i| PlaceInput {
-                target: Rect::new(10 + i * 24, 100, 16, 16),
+                target: Rect::new(10 + i * 26, 100, 16, 16),
                 size: s,
             })
             .collect();
@@ -272,7 +272,7 @@ mod tests {
         let chip = ChipLayout::default();
         let r = chip_rect(120, OUT, &chip, &[]);
         assert_eq!(r, Rect::new(1920 - 12 - 120, 1080 - 12 - 22, 120, 22));
-        let badge = Rect::new(r.x + 5, r.y + 5, 22, 17);
+        let badge = Rect::new(r.x + 5, r.y + 5, 24, 21);
         let l = chip_rect(120, OUT, &chip, &[badge]);
         assert_eq!(l, Rect::new(12, 1080 - 12 - 22, 120, 22));
     }
