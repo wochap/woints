@@ -62,3 +62,14 @@ For the focused window, `doctor` SHALL print whether the application is detected
 #### Scenario: WebKitGTK without reachable web content
 - **WHEN** the app maps WebKitGTK but no web root is found
 - **THEN** doctor prints a `warn` line naming WebKitGTK and zero web roots
+
+### Requirement: Hint font report
+`doctor` SHALL print, in the config group, the hint font in use: `ok  font: <family> <weight> (<file>)` when `hint.font` resolved to an installed face, `ok  font: embedded Atkinson Hyperlegible Mono` when `hint.font` names the embedded family and no installed face matches, and `warn  font "<name>" not found; using embedded Atkinson Hyperlegible Mono` when the configured family is not installed.
+
+#### Scenario: Font resolved
+- **WHEN** `hint.font = "Iosevka"` resolves to `Iosevka Nerd Font` Bold
+- **THEN** doctor prints `ok  font: Iosevka Nerd Font 700 (<path>)`
+
+#### Scenario: Font missing
+- **WHEN** `hint.font = "NoSuchFont"`
+- **THEN** doctor prints `warn  font "NoSuchFont" not found; using embedded Atkinson Hyperlegible Mono` and the exit code is unaffected

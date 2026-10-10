@@ -24,14 +24,14 @@ The overlay SHALL use `wp_fractional_scale_v1` (falling back to integer `wl_outp
 - **THEN** the overlay re-renders at the new scale before the next frame
 
 ### Requirement: Badge appearance
-Badges SHALL be drawn with `tiny-skia` as a filled rounded rect, a 1 px (device-scaled) stroke inset ½ px, and one text run in embedded Atkinson Hyperlegible Mono Bold using the `hint.*` tokens from the design (default theme Mocha: bg `#11111b`, fg `#cdd6f4`, border `#6c7086`, size 11, padding `[4,4]`, radius 3). The default badge height SHALL be 21 logical px (size 11 + 2 × padding 4 + 2 × border 1), matching a Vimium hint marker. When `hint.uppercase = true` (default) the label SHALL be drawn in capital letters; this changes only the drawn text, and filtering still matches typed keys by keycode.
+Badges SHALL be drawn with `tiny-skia` as a filled rounded rect, a 1 px (device-scaled) stroke inset ½ px, and one text run in the hint font (see "Hint font family") using the `hint.*` tokens from the design (default theme Mocha: bg `#11111b`, fg `#cdd6f4`, border `#6c7086`, size 11, padding `[4,4]`, radius 3). The default badge height SHALL be 21 logical px (size 11 + 2 × padding 4 + 2 × border 1), matching a Vimium hint marker. When `hint.uppercase = true` (default) the label SHALL be drawn in capital letters; this changes only the drawn text, and filtering still matches typed keys by keycode.
 
 #### Scenario: Demo render
 - **WHEN** `hints` runs in demo mode on the focused window
 - **THEN** badges labelled with generated labels appear at the window's corners and centre, and a PNG dump of the buffer (debug flag `WOINTS_DUMP=path`) shows the expected pixel sizes
 
 #### Scenario: Default badge size
-- **WHEN** a two-glyph label is drawn with default settings at scale 1
+- **WHEN** a two-glyph label is drawn with default settings (embedded font) at scale 1
 - **THEN** the badge is 24×21 logical px
 
 #### Scenario: Uppercase display
@@ -129,3 +129,40 @@ Badges for elements with `source = vision` SHALL use a dashed 1 px (device-scale
 #### Scenario: Dash scaled
 - **WHEN** the output scale is 2
 - **THEN** the dash pattern is `[4, 4]` device px
+
+### Requirement: Hint font family
+The overlay SHALL render badge and chip text with the installed font whose family equals `hint.font` (case-insensitive), or, when none does, the installed family whose name starts with `hint.font` (shortest such name wins), choosing the face closest to `hint.font_weight` in the normal style. When no installed family matches, it SHALL use the embedded Atkinson Hyperlegible Mono Bold and log a warning naming the font once per load; no warning is logged when `hint.font` is `Atkinson Hyperlegible Mono` (the embedded family).
+
+#### Scenario: Prefix match
+- **WHEN** `hint.font = "Iosevka"` and the installed families are `Iosevka Nerd Font` and `Iosevka Nerd Font Mono`
+- **THEN** badges render with `Iosevka Nerd Font` at the face closest to `font_weight`
+
+#### Scenario: Exact match wins
+- **WHEN** `hint.font = "Iosevka Nerd Font Mono"` and `Iosevka Nerd Font` is also installed
+- **THEN** badges render with `Iosevka Nerd Font Mono`
+
+#### Scenario: Font not installed
+- **WHEN** `hint.font = "NoSuchFont"`
+- **THEN** badges render with the embedded Atkinson Hyperlegible Mono Bold and the log contains a warning naming `NoSuchFont`
+
+#### Scenario: Default config
+- **WHEN** no `hint.font` is configured and Atkinson Hyperlegible Mono is not installed
+- **THEN** badges render with the embedded font and no warning is logged
+
+### Requirement: Badge width from font metrics
+Badge width SHALL be `ceil(n · advance) + 2·pad_x + 2·border` logical px, where `n` is the label length and `advance` is the largest advance width, at `hint.size`, among the displayed alphabet glyphs of the loaded font. Mode chip segment widths SHALL use the same advance. Badge height SHALL remain `size + 2·pad_y + 2·border` regardless of font.
+
+#### Scenario: Narrow font
+- **WHEN** the loaded font's widest alphabet glyph advance at size 11 is 5.5 px and padding is `[2,3]` with border 1
+- **THEN** a two-glyph badge is 19 × 17 logical px
+
+#### Scenario: Height ignores font
+- **WHEN** the font changes from the embedded one to Iosevka with the same `size`, padding and border
+- **THEN** badge height is unchanged
+
+### Requirement: Font reload
+On a successful config reload the daemon SHALL re-resolve the hint font; the next request and, when showing, the current overlay SHALL use the newly resolved font and advance.
+
+#### Scenario: Change font while showing
+- **WHEN** hints are showing, `hint.font` is changed to an installed family and `woints reload` runs
+- **THEN** the overlay re-renders with the new font and badge widths follow its advance on the next `hints`
