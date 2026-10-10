@@ -35,7 +35,9 @@ use smithay_client_toolkit::{
 };
 use tokio::sync::{mpsc, oneshot};
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle, event_created_child,
+    Connection, Dispatch, Proxy, QueueHandle,
+    backend::ObjectId,
+    event_created_child,
     globals::{GlobalList, registry_queue_init},
     protocol::{
         wl_callback, wl_display, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface,
@@ -176,6 +178,9 @@ pub(crate) struct State {
     renderer: Renderer,
     scene: Option<Scene>,
     surfaces: Vec<OutSurface>,
+    /// Keyboard `leave`/`enter` surfaces seen in the current dispatch.
+    focus_left: Vec<ObjectId>,
+    focus_entered: Vec<ObjectId>,
     pending: Option<PendingReply>,
     events: mpsc::UnboundedSender<OverlayEvent>,
     warned_mm: Vec<OutputId>,
@@ -230,7 +235,7 @@ pub(crate) fn run(
         }
     };
     event_loop
-        .run(None, &mut state, |_| {})
+        .run(None, &mut state, State::resolve_focus)
         .map_err(|e| format!("overlay event loop: {e}"))?;
     state.hide();
     Ok(())
@@ -305,6 +310,8 @@ impl State {
             renderer: Renderer::new(),
             scene: None,
             surfaces: Vec::new(),
+            focus_left: Vec::new(),
+            focus_entered: Vec::new(),
             pending: None,
             events,
             warned_mm: Vec::new(),
@@ -555,6 +562,27 @@ impl State {
             scale120: None,
             size: None,
             drawn: false,
+        }
+    }
+
+    /// After a dispatch: unmap and report `FocusLost` when keyboard focus
+    /// left the overlay without moving to another woints surface.
+    fn resolve_focus(&mut self) {
+        if self.focus_left.is_empty() && self.focus_entered.is_empty() {
+            return;
+        }
+        let live: Vec<ObjectId> = self
+            .surfaces
+            .iter()
+            .map(|s| s.layer.wl_surface().id())
+            .collect();
+        let lost = focus_lost(&self.focus_left, &self.focus_entered, &live);
+        self.focus_left.clear();
+        self.focus_entered.clear();
+        if lost {
+            tracing::debug!("keyboard focus lost; ending session");
+            self.hide();
+            let _ = self.events.send(OverlayEvent::FocusLost);
         }
     }
 
@@ -824,20 +852,22 @@ impl KeyboardHandler for State {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
-        _: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _: u32,
         _: &[u32],
         _: &[Keysym],
     ) {
+        self.focus_entered.push(surface.id());
     }
     fn leave(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
-        _: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _: u32,
     ) {
+        self.focus_left.push(surface.id());
     }
 
     fn press_key(
@@ -974,6 +1004,16 @@ impl Dispatch<wp_viewport::WpViewport, ()> for State {
         _: &QueueHandle<Self>,
     ) {
     }
+}
+
+/// Whether one dispatch's keyboard `leave`/`enter` events end the session:
+/// focus left a live woints surface and entered none. Leaves of surfaces
+/// woints already removed, and any leave with no surfaces showing, keep it.
+pub(crate) fn focus_lost<T: PartialEq>(left: &[T], entered: &[T], live: &[T]) -> bool {
+    if live.is_empty() || entered.iter().any(|e| live.contains(e)) {
+        return false;
+    }
+    left.iter().any(|l| live.contains(l))
 }
 
 /// Shift, Control, Caps/Shift Lock, Meta, Alt, Super, Hyper, ISO level
@@ -1129,6 +1169,26 @@ delegate_registry!(State);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_leave_without_enter_cancels() {
+        assert!(focus_lost(&[1], &[], &[1, 2]));
+    }
+
+    #[test]
+    fn focus_moving_between_woints_surfaces_keeps() {
+        assert!(!focus_lost(&[1], &[2], &[1, 2]));
+    }
+
+    #[test]
+    fn focus_leave_of_removed_surface_keeps() {
+        assert!(!focus_lost(&[3], &[], &[1, 2]));
+    }
+
+    #[test]
+    fn focus_leave_with_no_surfaces_keeps() {
+        assert!(!focus_lost(&[1], &[], &[]));
+    }
 
     #[test]
     fn modifier_keysyms() {

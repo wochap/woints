@@ -219,6 +219,8 @@ lists all defaults. Sections: `[hint]`, `[timing]`, `[chip]`, `[theme.mocha]`,
 | `scroll` | pick a scroll container (skipped when there is one); `h j k l` / arrows scroll `input.scroll_step` (3) lines of 15 px; Tab re-picks, Esc exits | pointer axis events |
 | `copy` | element text (`Text.GetText`, else its name) to the clipboard as `text/plain;charset=utf-8` | AT-SPI + data control |
 
+Losing keyboard focus (e.g. a launcher opening) ends the session in every mode, drag phase 2 included.
+
 Modifiers held on the **final** glyph pick the action: Shift → `right`,
 Ctrl → `middle`, Alt → `hover` (`input.modifiers.shift/ctrl/alt/super`, each
 an action or `"none"`). An explicit `--action` wins over modifiers. Glyphs match

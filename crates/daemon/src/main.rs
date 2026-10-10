@@ -123,6 +123,7 @@ async fn overlay_events(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<Ove
     while let Some(ev) = rx.recv().await {
         match ev {
             OverlayEvent::Escaped => daemon.apply(Input::Escape).await,
+            OverlayEvent::FocusLost => daemon.apply(Input::Cancel).await,
             OverlayEvent::Key(k) => {
                 tracing::debug!(keycode = k.keycode, keysym = k.keysym, utf8 = ?k.utf8, "key");
                 if let Some(input) = daemon.key_input(&k).await {

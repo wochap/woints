@@ -211,6 +211,9 @@ pub enum OverlayEvent {
     Key(KeyPress),
     /// Escape pressed; the overlay has already unmapped.
     Escaped,
+    /// Keyboard focus left the overlay for another surface; the overlay has
+    /// already unmapped.
+    FocusLost,
     /// The overlay thread stopped (Wayland disconnect or panic).
     Gone(String),
 }
