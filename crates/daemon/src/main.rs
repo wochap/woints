@@ -82,6 +82,7 @@ async fn main() -> std::process::ExitCode {
         }
     };
     let (daemon, overlay_rx) = Daemon::new(hypr.clone(), config_path);
+    daemon.load_fonts().await;
     daemon.refresh_layout().await;
     if let Err(e) = daemon.start_overlay().await {
         tracing::error!("overlay unavailable at startup: {e}");

@@ -23,6 +23,7 @@ use woints_core::proto::{
 use woints_core::theme::{Eliminated, Theme};
 use woints_hypr::{Hypr, HyprSnapshot, Monitor};
 use woints_input::{AbsoluteBackend, Backend, MovecursorBackend, PointerActuator};
+use woints_overlay::font::{self, ResolvedFont, fontdb::Database};
 use woints_overlay::render::{OutputSurface, Renderer};
 use woints_overlay::{OverlayHandle, PointerLink};
 use woints_qs::QuickshellIpcProvider;
@@ -92,14 +93,39 @@ pub struct Settings {
     pub theme: Theme,
     pub input: InputConfig,
     pub routing: ActuatorRouting,
+    /// Face resolved for `hint.font`.
+    pub font: ResolvedFont,
 }
 
 impl Settings {
-    pub fn new(config: Config, layout: Option<&[Option<char>]>) -> Self {
+    /// `fonts` is the system font database; `None` (not scanned yet) uses
+    /// the embedded font.
+    pub fn new(config: Config, layout: Option<&[Option<char>]>, fonts: Option<&Database>) -> Self {
         let alphabet = config.alphabet(layout);
-        let theme = config.theme(&alphabet);
+        let mut theme = config.theme(&alphabet);
         let input = config.input_config();
+        let hint = &mut theme.hint;
+        let resolved = match fonts {
+            Some(db) => font::resolve(db, &hint.font, hint.font_weight),
+            None => ResolvedFont::embedded(&hint.font),
+        };
+        if fonts.is_some() && resolved.missing() {
+            tracing::warn!(
+                "hint font {:?} not found; using embedded {}",
+                hint.font,
+                font::EMBEDDED_FAMILY
+            );
+        }
+        let glyphs = if hint.uppercase {
+            hint.alphabet.to_uppercase()
+        } else {
+            hint.alphabet.clone()
+        };
+        let loaded = font::load(&resolved);
+        hint.advance_em = font::advance_em(&loaded, &glyphs);
+        hint.font_file = resolved.file();
         Self {
+            font: resolved,
             routing: ActuatorRouting {
                 prefer: input.prefer,
             },
@@ -187,6 +213,8 @@ pub struct Daemon {
     last_collect: Mutex<Vec<CollectReport>>,
     last_action: Mutex<Option<ActionOutcome>>,
     renderer: Mutex<Renderer>,
+    /// System font database, scanned at start-up and on reload (design D5).
+    fonts: Mutex<Option<Arc<Database>>>,
     pub(crate) provider: Provider,
     pub(crate) quickshell: Option<QuickshellIpcProvider>,
     /// Vision over the running overlay's capture link; rebuilt with the overlay.
@@ -259,7 +287,7 @@ impl Daemon {
         };
         let d = Arc::new(Self {
             started: Instant::now(),
-            settings: RwLock::new(Arc::new(Settings::new(config, None))),
+            settings: RwLock::new(Arc::new(Settings::new(config, None, None))),
             config_path,
             config_status: Mutex::new(status),
             layout: Mutex::new(None),
@@ -274,6 +302,7 @@ impl Daemon {
             last_collect: Mutex::new(Vec::new()),
             last_action: Mutex::new(None),
             renderer: Mutex::new(Renderer::new()),
+            fonts: Mutex::new(None),
             provider,
             quickshell,
             #[cfg(feature = "vision")]
@@ -326,7 +355,8 @@ impl Daemon {
     async fn install(&self, config: Config) {
         let layout = self.layout.lock().await.clone();
         let old = self.settings();
-        let new = Settings::new(config, layout.as_deref());
+        let fonts = self.fonts.lock().await.clone();
+        let new = Settings::new(config, layout.as_deref(), fonts.as_deref());
         let alphabet_changed = old.theme.hint.alphabet != new.theme.hint.alphabet;
         let look_changed = old.theme != new.theme;
         let theme = new.theme.clone();
@@ -367,6 +397,21 @@ impl Daemon {
         }
     }
 
+    /// Scan system fonts on a blocking thread.
+    async fn scan_fonts(&self) {
+        match tokio::task::spawn_blocking(font::system_db).await {
+            Ok(db) => *self.fonts.lock().await = Some(Arc::new(db)),
+            Err(e) => tracing::warn!("font scan: {e}"),
+        }
+    }
+
+    /// Start-up font scan; re-resolves the hint font of the active config.
+    pub async fn load_fonts(&self) {
+        self.scan_fonts().await;
+        let config = self.settings().config.clone();
+        self.install(config).await;
+    }
+
     /// `reload` and SIGHUP: parse, validate, swap; keep the last good config
     /// on error.
     pub async fn reload(&self) -> Response {
@@ -385,6 +430,7 @@ impl Daemon {
             Ok((l, src)) => {
                 let status = loaded_status(&src, l.warnings);
                 *self.config_status.lock().await = status.clone();
+                self.scan_fonts().await;
                 self.install(l.config).await;
                 tracing::info!(source = %status.source, "config reloaded");
                 Response::with(&ReloadReply { config: status })
@@ -1436,6 +1482,17 @@ mod tests {
         let s: StatusReply = r.payload().unwrap();
         assert_eq!(s.state, State::Idle);
         assert!(!s.overlay);
+    }
+
+    #[test]
+    fn missing_font_uses_embedded_advance() {
+        let mut config = Config::default();
+        config.hint.font = "NoSuchFont".into();
+        let s = Settings::new(config, None, Some(&Database::new()));
+        assert!(s.font.missing());
+        assert_eq!(s.theme.hint.font_file, None);
+        let embedded = font::advance_em(&font::load_file(None), "ASDFGHJKL");
+        assert_eq!(s.theme.hint.advance_em, embedded);
     }
 
     fn demo() -> Arc<Daemon> {

@@ -3,8 +3,8 @@
 # Reload with `woints reload` or `pkill -HUP wointsd`.
 
 [hint]
-font         = "Atkinson Hyperlegible Mono"
-font_weight  = 700
+font         = "Atkinson Hyperlegible Mono" # system family (exact name, else prefix match); embedded font when not installed
+font_weight  = 700       # nearest installed weight
 size         = 11        # logical px, × output scale, rounded
 min_size     = 10
 size_unit    = "logical" # or "mm"

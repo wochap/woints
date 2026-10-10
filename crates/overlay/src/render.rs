@@ -1,9 +1,9 @@
 //! Headless badge renderer: rounded rects + one text run per badge (design §01).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use fontdue::{Font, FontSettings, Metrics};
+use fontdue::{Font, Metrics};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use woints_core::geom::{
@@ -73,6 +73,8 @@ pub struct OutputSurface {
 
 pub struct Renderer {
     font: Font,
+    /// `hint.font_file` the loaded font came from.
+    font_file: Option<(PathBuf, u32)>,
     glyphs: HashMap<(char, u32), (Metrics, Vec<u8>)>,
 }
 
@@ -84,10 +86,9 @@ impl Default for Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
-        let font = Font::from_bytes(FONT_BYTES, FontSettings::default())
-            .expect("embedded font must parse");
         Self {
-            font,
+            font: crate::font::load_file(None),
+            font_file: None,
             glyphs: HashMap::new(),
         }
     }
@@ -100,9 +101,19 @@ impl Renderer {
             .or_insert_with(|| font.rasterize(c, px))
     }
 
+    /// Switch to `file` (design D4), dropping cached glyphs of the old font.
+    fn use_font(&mut self, file: &Option<(PathBuf, u32)>) {
+        if self.font_file != *file {
+            self.font = crate::font::load_file(file.as_ref());
+            self.font_file = file.clone();
+            self.glyphs.clear();
+        }
+    }
+
     /// Render every badge on `out` (plus the chip if it targets `out`) into a
     /// transparent pixmap of the output's device size.
     pub fn render(&mut self, scene: &Scene, out: &OutputSurface) -> Pixmap {
+        self.use_font(&scene.theme.hint.font_file);
         let g = &out.geom;
         let (w, h) = g.device_size();
         let mut pm = Pixmap::new(w, h).expect("non-zero output size");
@@ -894,6 +905,26 @@ mod tests {
         assert_eq!(count_rgb(&with, t.drag_bg), (SWATCH * SWATCH) as usize);
         assert_eq!(count_rgb(&without, t.drag_bg), 0);
         assert!(count_rgb(&with, t.fg_dim) > 0);
+    }
+
+    #[test]
+    fn render_switches_font() {
+        let ttf = std::env::temp_dir().join(format!("woints-font-{}.ttf", std::process::id()));
+        std::fs::write(&ttf, FONT_BYTES).unwrap();
+        let mut r = Renderer::new();
+        let mut scene = badge_scene(true);
+        let embedded = r.render(&scene, &output(1.0));
+        assert!(!r.glyphs.is_empty());
+        scene.theme.hint.font_file = Some((ttf.clone(), 0));
+        r.use_font(&scene.theme.hint.font_file);
+        assert!(r.glyphs.is_empty(), "glyph cache reset on font change");
+        let file = r.render(&scene, &output(1.0));
+        assert_eq!(r.font_file, Some((ttf.clone(), 0)));
+        assert_eq!(embedded.data(), file.data());
+        scene.theme.hint.font_file = None;
+        r.render(&scene, &output(1.0));
+        assert_eq!(r.font_file, None);
+        std::fs::remove_file(ttf).unwrap();
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! calloop; the daemon talks to it through [`OverlayHandle`].
 
 pub mod capture;
+pub mod font;
 pub mod render;
 mod wayland;
 

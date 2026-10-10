@@ -1,6 +1,7 @@
 //! Design tokens (design §08 colours, §11 `config.toml` defaults).
 
 use std::fmt;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -152,8 +153,14 @@ pub struct HintLayout {
     #[serde(skip)]
     pub alphabet: String,
     pub uppercase: bool,
-    /// Glyph advance as a fraction of the em size (monospace).
+    /// Widest displayed glyph advance as a fraction of the em size, measured
+    /// from the loaded font (not a `[hint]` key).
+    #[serde(skip)]
     pub advance_em: f32,
+    /// File and face index of the resolved `font`; `None` is the embedded
+    /// font (not a `[hint]` key).
+    #[serde(skip)]
+    pub font_file: Option<(PathBuf, u32)>,
     pub prefix_style: PrefixStyle,
     pub eliminated: Eliminated,
     /// Dash pattern of vision badge borders and outlines, logical px.
@@ -181,6 +188,7 @@ impl Default for HintLayout {
             alphabet: "asdfghjkl".into(),
             uppercase: true,
             advance_em: 0.6,
+            font_file: None,
             prefix_style: PrefixStyle::HighlightMatched,
             eliminated: Eliminated::Hide,
             vision_dash: [2.0, 2.0],

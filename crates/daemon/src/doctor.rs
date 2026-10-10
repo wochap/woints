@@ -8,6 +8,7 @@ use woints_core::doctor::{
     Check, FocusedFacts, Report, env_checks, focused_checks, wayland_checks,
 };
 use woints_core::ports::Budget;
+use woints_overlay::font::{EMBEDDED_FAMILY, ResolvedFont};
 
 use crate::daemon::{Daemon, Provider};
 
@@ -231,6 +232,52 @@ impl Daemon {
                 .iter()
                 .map(|w| Check::warn(format!("config: {w}"))),
         );
+        out.push(font_check(&self.settings().font));
         out
+    }
+}
+
+/// Config-group line for the hint font in use.
+fn font_check(f: &ResolvedFont) -> Check {
+    match &f.path {
+        _ if f.missing() => Check::warn(format!(
+            "font {:?} not found; using embedded {EMBEDDED_FAMILY}",
+            f.requested
+        )),
+        Some(p) if f.found => {
+            Check::ok(format!("font: {} {} ({})", f.family, f.weight, p.display()))
+        }
+        _ => Check::ok(format!("font: embedded {EMBEDDED_FAMILY}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use woints_core::doctor::Level;
+
+    use super::*;
+
+    #[test]
+    fn font_lines() {
+        let found = ResolvedFont {
+            requested: "Iosevka".into(),
+            family: "Iosevka Nerd Font".into(),
+            weight: 700,
+            path: Some("/fonts/iosevka.ttf".into()),
+            index: 0,
+            found: true,
+        };
+        let c = font_check(&found);
+        assert_eq!(c.level, Level::Ok);
+        assert_eq!(c.message, "font: Iosevka Nerd Font 700 (/fonts/iosevka.ttf)");
+        let c = font_check(&ResolvedFont::embedded(EMBEDDED_FAMILY));
+        assert_eq!(c.level, Level::Ok);
+        assert_eq!(c.message, "font: embedded Atkinson Hyperlegible Mono");
+        let c = font_check(&ResolvedFont::embedded("NoSuchFont"));
+        assert_eq!(c.level, Level::Warn);
+        assert_eq!(
+            c.message,
+            "font \"NoSuchFont\" not found; using embedded Atkinson Hyperlegible Mono"
+        );
     }
 }

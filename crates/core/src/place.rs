@@ -161,7 +161,20 @@ mod tests {
     use super::*;
 
     fn hint() -> HintLayout {
-        HintLayout::default()
+        HintLayout {
+            advance_em: 0.6,
+            ..HintLayout::default()
+        }
+    }
+
+    #[test]
+    fn badge_width_follows_advance() {
+        let h = HintLayout {
+            advance_em: 0.5,
+            padding: [2, 3],
+            ..hint()
+        };
+        assert_eq!(badge_size(2, &h), Size { w: 19, h: 17 });
     }
 
     const OUT: Size = Size { w: 1920, h: 1080 };
