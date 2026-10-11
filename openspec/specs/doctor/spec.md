@@ -92,3 +92,18 @@ When the focused window's toolkit is `Chromium`, `doctor` SHALL print the state 
 #### Scenario: Wake blocked
 - **WHEN** the focused Chromium window stays dormant after the wake
 - **THEN** doctor prints the `fail` line naming `--disable-renderer-accessibility` and exits 1
+
+### Requirement: Colour scheme report
+`doctor` SHALL print, in the config group, the detected colour scheme and the palette in use: `ok  scheme: <dark|light> (portal), palette: <dark|light>` when the portal answered, and `warn  scheme: dark (fallback; no XDG settings portal answer), palette: <dark|light>` when detection fell back. The palette is the one `hint.theme` resolves to. The fallback line SHALL NOT change the exit code.
+
+#### Scenario: Portal answers
+- **WHEN** the portal reports light and `hint.theme = "auto"`
+- **THEN** doctor prints `ok  scheme: light (portal), palette: light`
+
+#### Scenario: Forced palette
+- **WHEN** the portal reports light and `hint.theme = "dark"`
+- **THEN** doctor prints `ok  scheme: light (portal), palette: dark`
+
+#### Scenario: No portal
+- **WHEN** the portal is unreachable
+- **THEN** doctor prints `warn  scheme: dark (fallback; no XDG settings portal answer), palette: dark` and the exit code is unaffected

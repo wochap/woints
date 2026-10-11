@@ -24,7 +24,7 @@ The overlay SHALL use `wp_fractional_scale_v1` (falling back to integer `wl_outp
 - **THEN** the overlay re-renders at the new scale before the next frame
 
 ### Requirement: Badge appearance
-Badges SHALL be drawn with `tiny-skia` as a filled rounded rect, a 1 px (device-scaled) stroke inset ½ px, and one text run in the hint font (see "Hint font family") using the `hint.*` tokens from the design (default theme Mocha: bg `#11111b`, fg `#cdd6f4`, border `#6c7086`, size 11, padding `[4,4]`, radius 3). The default badge height SHALL be 21 logical px (size 11 + 2 × padding 4 + 2 × border 1), matching a Vimium hint marker. When `hint.uppercase = true` (default) the label SHALL be drawn in capital letters; this changes only the drawn text, and filtering still matches typed keys by keycode.
+Badges SHALL be drawn with `tiny-skia` as a filled rounded rect, a 1 px (device-scaled) stroke inset ½ px, and one text run in the hint font (see "Hint font family") using the `hint.*` tokens from the design (default dark theme: bg `#a6e3a1`, fg `#181825`, border `#181825`, typed glyphs `fg_dim` `#585b70`, size 11, padding `[4,4]`, radius 3; default light theme: bg `#40a02b`, fg `#e6e9ef`, border `#e6e9ef`, typed glyphs `#acb0be`). The default `prefix_style` SHALL be `dim-matched`. The default badge height SHALL be 21 logical px (size 11 + 2 × padding 4 + 2 × border 1), matching a Vimium hint marker. When `hint.uppercase = true` (default) the label SHALL be drawn in capital letters; this changes only the drawn text, and filtering still matches typed keys by keycode.
 
 #### Scenario: Demo render
 - **WHEN** `hints` runs in demo mode on the focused window
@@ -41,6 +41,14 @@ Badges SHALL be drawn with `tiny-skia` as a filled rounded rect, a 1 px (device-
 #### Scenario: Lowercase opt-out
 - **WHEN** the config sets `[hint] uppercase = false`
 - **THEN** the badge shows `as`
+
+#### Scenario: Default dark colours
+- **WHEN** the active palette is the default dark one and the buffer is empty
+- **THEN** the badge fill is `#a6e3a1` and the label colour is `#181825`
+
+#### Scenario: Typed prefix dimmed
+- **WHEN** the buffer matches the first glyph of a label with default settings
+- **THEN** that glyph is drawn in `fg_dim` and the remaining glyphs in `fg`
 
 ### Requirement: Keyboard handling
 While showing, the overlay SHALL receive all keyboard input, map keycodes through the compositor-provided xkb keymap, forward key presses (keycode, keysym, utf8, modifiers) to the daemon, and unmap on Escape. When keyboard focus leaves the overlay while it is showing and does not move to another woints overlay surface, the overlay SHALL unmap and the daemon SHALL return to idle in every showing mode (hints, drag phase 1 and 2, scroll). Focus leaving a surface that woints itself removed SHALL NOT end the session.
@@ -70,11 +78,15 @@ While showing, the overlay SHALL receive all keyboard input, map keycodes throug
 - **THEN** the session keeps showing on the remaining surfaces
 
 ### Requirement: Mode chip
-The overlay SHALL draw the mode chip (mode, typed buffer, scope) in the bottom-right of the active output, 12 px inset, 22 px high, per the design, moving to bottom-left if any badge would intersect it.
+The overlay SHALL draw the mode chip (mode, typed buffer, scope) in the bottom-right of the active output, 12 px inset, 22 px high, per the design, moving to bottom-left if any badge would intersect it. The chip SHALL be drawn with the `chip_bg` fill, `chip_border` border and dividers, `chip_fg` mode and scope text and `chip_accent` typed buffer, and SHALL NOT use the badge `bg`, `fg`, `border` or `accent` tokens.
 
 #### Scenario: Chip collision
 - **WHEN** a badge rect intersects the bottom-right chip rect
 - **THEN** the chip is drawn bottom-left instead
+
+#### Scenario: Chip independent of badges
+- **WHEN** the badge `bg` is `#a6e3a1` and `chip_bg` is `#1e1e2e`
+- **THEN** the chip fill is `#1e1e2e`
 
 ### Requirement: Physical size mode
 When `hint.size_unit = "mm"`, the overlay SHALL derive the badge font size from each output's physical size reported by `wl_output.geometry` (`size_mm` ÷ physical width mm × device px), scaling padding and radius by the same factor, so badges have the same physical size on every output. When an output reports 0 mm, it SHALL fall back to logical sizing for that output. Default is `size_unit = "logical"`.

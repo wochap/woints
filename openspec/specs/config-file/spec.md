@@ -6,22 +6,36 @@ TOML configuration file location, defaults, validation and reload.
 ## Requirements
 
 ### Requirement: Location and defaults
-`wointsd` SHALL read `$XDG_CONFIG_HOME/woints/config.toml` (default `~/.config/woints/config.toml`) or the path from `--config`. Missing file means built-in defaults, which SHALL equal the design §11 TOML (`[hint]`, `[timing]`, `[chip]`, `[theme.mocha]`, `[theme.latte]`) plus `[keys] mode="auto" alphabet="asdfghjkl" exclude=[]`, `[scope] default="focused" ignore_layers=["awww-daemon","wayland-pipewire-idle-inhibit"]`, `[vision] mode="auto" min_atspi_elements=3 force_classes=[]`, `[merge] iou_threshold=0.5`, `[input] pointer="movecursor" prefer="action" restore_cursor=true modifiers={shift="right",ctrl="middle",alt="hover"}`, `[providers.quickshell] mode="auto"`, `[apps] disabled_classes=[] force_vision_classes=[]`, `[timing] max_showing_ms=15000`.
+`wointsd` SHALL read `$XDG_CONFIG_HOME/woints/config.toml` (default `~/.config/woints/config.toml`) or the path from `--config`. Missing file means built-in defaults, which SHALL equal the design §11 TOML (`[hint]` with `theme="auto"` and `prefix_style="dim-matched"`, `[timing]`, `[chip]`, `[theme.dark]`, `[theme.light]`) plus `[keys] mode="auto" alphabet="asdfghjkl" exclude=[]`, `[scope] default="focused" ignore_layers=["awww-daemon","wayland-pipewire-idle-inhibit"]`, `[vision] mode="auto" min_atspi_elements=3 force_classes=[]`, `[merge] iou_threshold=0.5`, `[input] pointer="movecursor" prefer="action" restore_cursor=true modifiers={shift="right",ctrl="middle",alt="hover"}`, `[providers.quickshell] mode="auto"`, `[apps] disabled_classes=[] force_vision_classes=[]`, `[timing] max_showing_ms=15000`.
+
+`hint.theme` SHALL accept `"auto"`, `"dark"` and `"light"`. `[theme.dark]` and `[theme.light]` SHALL each accept any subset of the tokens `bg`, `fg`, `fg_dim`, `accent`, `border`, `outline`, `vision`, `flash_bg`, `flash_fg`, `drag_bg`, `drag_fg`, `scroll`, `disabled_bg`, `disabled_fg`, `chip_bg`, `chip_fg`, `chip_border`, `chip_accent`; tokens left out SHALL keep the built-in default of that table.
 
 #### Scenario: No file
 - **WHEN** no config file exists
 - **THEN** `status.config.path` is null, `status.config.source` is `"defaults"` and the daemon runs
 
 #### Scenario: Partial file
-- **WHEN** the file sets only `[hint] theme = "latte"`
+- **WHEN** the file sets only `[hint] theme = "light"`
 - **THEN** every other value equals the default
 
+#### Scenario: Partial palette
+- **WHEN** the file sets only `[theme.dark]` with `hint.accent = "#ff0000"`
+- **THEN** the dark accent is `#ff0000` and every other dark token and the whole light palette equal the defaults
+
+#### Scenario: Old theme names
+- **WHEN** the file sets `[hint] theme = "mocha"`
+- **THEN** loading fails with `hint.theme: expected auto, dark or light`
+
 ### Requirement: Validation
-Config loading SHALL fail with a message naming the key when: alphabet has fewer than 4 unique glyphs, `iou_threshold` ∉ (0,1], `min_atspi_elements` < 0, colours are not `#rrggbb`/`#rrggbbaa`, a modifier maps to an unknown action, or an unknown key is present (unknown keys are warnings, not errors).
+Config loading SHALL fail with a message naming the key when: alphabet has fewer than 4 unique glyphs, `iou_threshold` ∉ (0,1], `min_atspi_elements` < 0, colours are not `#rrggbb`/`#rrggbbaa`, `hint.theme` is not `auto`, `dark` or `light`, a modifier maps to an unknown action, or an unknown key is present (unknown keys are warnings, not errors).
 
 #### Scenario: Bad colour
-- **WHEN** `theme.mocha.bg = "red"`
-- **THEN** loading fails with `theme.mocha.bg: expected #rrggbb or #rrggbbaa`
+- **WHEN** `theme.dark.bg = "red"`
+- **THEN** loading fails with `theme.dark.bg: expected #rrggbb or #rrggbbaa`
+
+#### Scenario: Old palette table
+- **WHEN** the file contains `[theme.mocha]`
+- **THEN** loading succeeds with the warning `theme.mocha: unknown key`
 
 ### Requirement: Reload
 The daemon SHALL reload on `SIGHUP` and on the `reload` protocol command. On success the new config applies to the next request and the overlay re-renders if showing; on failure the previous config stays active and the error is stored in `status.config.errors` and printed by `doctor`.
