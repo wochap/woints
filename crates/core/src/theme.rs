@@ -69,46 +69,58 @@ pub struct Tokens {
     pub scroll: Color,
     pub disabled_bg: Color,
     pub disabled_fg: Color,
+    pub chip_bg: Color,
+    pub chip_fg: Color,
+    pub chip_border: Color,
+    pub chip_accent: Color,
 }
 
 impl Tokens {
-    /// Catppuccin Mocha (dark, default).
-    pub fn mocha() -> Self {
+    /// Catppuccin Mocha based palette for dark colour schemes.
+    pub fn dark() -> Self {
         Self {
-            bg: Color::hex(0x11111b),          // crust
-            fg: Color::hex(0xcdd6f4),          // text
-            fg_dim: Color::hex(0xa6adc8),      // subtext0
-            accent: Color::hex(0xcba6f7),      // mauve
-            border: Color::hex(0x6c7086),      // overlay0
-            outline: Color::hex(0xb4befe),     // lavender
-            vision: Color::hex(0x94e2d5),      // teal
-            flash_bg: Color::hex(0xa6e3a1),    // green
-            flash_fg: Color::hex(0x11111b),    // crust
-            drag_bg: Color::hex(0xfab387),     // peach
-            drag_fg: Color::hex(0x11111b),     // crust
-            scroll: Color::hex(0x89b4fa),      // blue
-            disabled_bg: Color::hex(0x181825), // mantle
-            disabled_fg: Color::hex(0x6c7086), // overlay0
+            bg: Color::hex(0xa6e3a1),
+            fg: Color::hex(0x181825),
+            fg_dim: Color::hex(0x585b70),
+            accent: Color::hex(0xb4befe),
+            border: Color::hex(0x181825),
+            outline: Color::hex(0xb4befe),
+            vision: Color::hex(0x94e2d5),
+            flash_bg: Color::hex(0xfab387),
+            flash_fg: Color::hex(0x181825),
+            drag_bg: Color::hex(0xfab387),
+            drag_fg: Color::hex(0x181825),
+            scroll: Color::hex(0x89b4fa),
+            disabled_bg: Color::hex(0x313244),
+            disabled_fg: Color::hex(0x7f849c),
+            chip_bg: Color::hex(0x1e1e2e),
+            chip_fg: Color::hex(0xcdd6f4),
+            chip_border: Color::hex(0xcdd6f4),
+            chip_accent: Color::hex(0xb4befe),
         }
     }
 
-    /// Catppuccin Latte (light).
-    pub fn latte() -> Self {
+    /// Catppuccin Latte based palette for light colour schemes.
+    pub fn light() -> Self {
         Self {
-            bg: Color::hex(0xeff1f5),          // base
-            fg: Color::hex(0x4c4f69),          // text
-            fg_dim: Color::hex(0x5c5f77),      // subtext1
-            accent: Color::hex(0x8839ef),      // mauve
-            border: Color::hex(0x7c7f93),      // overlay2
-            outline: Color::hex(0x7287fd),     // lavender
-            vision: Color::hex(0x179299),      // teal
-            flash_bg: Color::hex(0x40a02b),    // green
-            flash_fg: Color::hex(0x11111b),    // mocha crust
-            drag_bg: Color::hex(0xfe640b),     // peach
-            drag_fg: Color::hex(0x11111b),     // mocha crust
-            scroll: Color::hex(0x1e66f5),      // blue
-            disabled_bg: Color::hex(0xe6e9ef), // mantle
-            disabled_fg: Color::hex(0x8c8fa1), // overlay1
+            bg: Color::hex(0x40a02b),
+            fg: Color::hex(0xe6e9ef),
+            fg_dim: Color::hex(0xacb0be),
+            accent: Color::hex(0x7287fd),
+            border: Color::hex(0xe6e9ef),
+            outline: Color::hex(0x7287fd),
+            vision: Color::hex(0x179299),
+            flash_bg: Color::hex(0xfe640b),
+            flash_fg: Color::hex(0x11111b),
+            drag_bg: Color::hex(0xfe640b),
+            drag_fg: Color::hex(0x11111b),
+            scroll: Color::hex(0x1e66f5),
+            disabled_bg: Color::hex(0xccd0da),
+            disabled_fg: Color::hex(0x5c5f77),
+            chip_bg: Color::hex(0xeff1f5),
+            chip_fg: Color::hex(0x4c4f69),
+            chip_border: Color::hex(0x4c4f69),
+            chip_accent: Color::hex(0x8839ef),
         }
     }
 }
@@ -121,13 +133,52 @@ pub enum SizeUnit {
     Mm,
 }
 
-/// Which `[theme.*]` palette badges use.
+/// Which `[theme.*]` palette badges use; `auto` follows the system scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeName {
     #[default]
-    Mocha,
-    Latte,
+    Auto,
+    Dark,
+    Light,
+}
+
+/// System colour scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+/// Where the detected [`Scheme`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SchemeSource {
+    /// XDG settings portal answered with a preference.
+    Portal,
+    /// Portal unreachable, failing or without preference: dark.
+    #[default]
+    Fallback,
+}
+
+impl Scheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scheme::Dark => "dark",
+            Scheme::Light => "light",
+        }
+    }
+}
+
+impl SchemeSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SchemeSource::Portal => "portal",
+            SchemeSource::Fallback => "fallback",
+        }
+    }
 }
 
 /// `[hint]` layout defaults.
@@ -189,12 +240,12 @@ impl Default for HintLayout {
             uppercase: true,
             advance_em: 0.6,
             font_file: None,
-            prefix_style: PrefixStyle::HighlightMatched,
+            prefix_style: PrefixStyle::DimMatched,
             eliminated: Eliminated::Hide,
             vision_dash: [2.0, 2.0],
             outline: false,
             outline_width: 1,
-            theme: ThemeName::Mocha,
+            theme: ThemeName::Auto,
         }
     }
 }
@@ -204,9 +255,9 @@ impl Default for HintLayout {
 #[serde(rename_all = "kebab-case")]
 pub enum PrefixStyle {
     /// Matched glyphs in `accent`, remaining in `fg_dim`.
-    #[default]
     HighlightMatched,
     /// Vimium style: matched glyphs in `fg_dim`, remaining in `fg`.
+    #[default]
     DimMatched,
 }
 
@@ -278,7 +329,7 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            tokens: Tokens::mocha(),
+            tokens: Tokens::dark(),
             hint: HintLayout::default(),
             chip: ChipLayout::default(),
             timing: TimingLayout::default(),
@@ -314,10 +365,10 @@ mod tests {
 
     #[test]
     fn colours() {
-        assert_eq!(format!("{:?}", Tokens::mocha().bg), "#11111b");
-        assert_eq!(Color::parse("#cdd6f4"), Some(Tokens::mocha().fg));
-        assert_eq!(Tokens::latte().accent, Color::hex(0x8839ef));
-        assert_eq!(Color::parse("#cdd6f4cc"), Some(Tokens::mocha().fg));
+        assert_eq!(format!("{:?}", Tokens::dark().bg), "#a6e3a1");
+        assert_eq!(Color::parse("#181825"), Some(Tokens::dark().fg));
+        assert_eq!(Tokens::light().chip_accent, Color::hex(0x8839ef));
+        assert_eq!(Color::parse("#181825cc"), Some(Tokens::dark().fg));
         assert_eq!(Color::parse("red"), None);
         assert_eq!(Color::parse("#12345g"), None);
     }

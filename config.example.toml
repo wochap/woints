@@ -17,11 +17,11 @@ gap          = 2         # min space between badges
 center_below = 20        # targets smaller than this are centred
 uppercase    = true
 eliminated   = "hide"    # "hide" | "fade"
-prefix_style = "highlight-matched" # or "dim-matched"
+prefix_style = "dim-matched" # or "highlight-matched"
 outline      = false
 outline_width = 1
 vision_dash  = [2, 2]
-theme        = "mocha"   # "mocha" | "latte"
+theme        = "auto"    # "auto" (follow the system) | "dark" | "light"
 
 [timing]
 appear_ms = 0
@@ -34,37 +34,45 @@ corner = "bottom-right"
 inset  = 12
 height = 22
 
-[theme.mocha]   # Catppuccin Mocha
-hint.bg          = "#11111b"  # crust
-hint.fg          = "#cdd6f4"  # text
-hint.fg_dim      = "#a6adc8"  # subtext0
-hint.accent      = "#cba6f7"  # mauve
-hint.border      = "#6c7086"  # overlay0
-hint.outline     = "#b4befe"  # lavender
-hint.vision      = "#94e2d5"  # teal
-hint.flash_bg    = "#a6e3a1"  # green
-hint.flash_fg    = "#11111b"  # crust
-hint.drag_bg     = "#fab387"  # peach
-hint.drag_fg     = "#11111b"  # crust
-hint.scroll      = "#89b4fa"  # blue
-hint.disabled_bg = "#181825"  # mantle
-hint.disabled_fg = "#6c7086"  # overlay0
+[theme.dark]   # Catppuccin Mocha based; any subset of tokens
+hint.bg           = "#a6e3a1"
+hint.fg           = "#181825"
+hint.fg_dim       = "#585b70"
+hint.accent       = "#b4befe"
+hint.border       = "#181825"
+hint.outline      = "#b4befe"
+hint.vision       = "#94e2d5"
+hint.flash_bg     = "#fab387"
+hint.flash_fg     = "#181825"
+hint.drag_bg      = "#fab387"
+hint.drag_fg      = "#181825"
+hint.scroll       = "#89b4fa"
+hint.disabled_bg  = "#313244"
+hint.disabled_fg  = "#7f849c"
+hint.chip_bg      = "#1e1e2e"
+hint.chip_fg      = "#cdd6f4"
+hint.chip_border  = "#cdd6f4"
+hint.chip_accent  = "#b4befe"
 
-[theme.latte]   # Catppuccin Latte
-hint.bg          = "#eff1f5"  # base
-hint.fg          = "#4c4f69"  # text
-hint.fg_dim      = "#5c5f77"  # subtext1
-hint.accent      = "#8839ef"  # mauve
-hint.border      = "#7c7f93"  # overlay2
-hint.outline     = "#7287fd"  # lavender
-hint.vision      = "#179299"  # teal
-hint.flash_bg    = "#40a02b"  # green
-hint.flash_fg    = "#11111b"  # mocha crust
-hint.drag_bg     = "#fe640b"  # peach
-hint.drag_fg     = "#11111b"  # mocha crust
-hint.scroll      = "#1e66f5"  # blue
-hint.disabled_bg = "#e6e9ef"  # mantle
-hint.disabled_fg = "#8c8fa1"  # overlay1
+[theme.light]   # Catppuccin Latte based; any subset of tokens
+hint.bg           = "#40a02b"
+hint.fg           = "#e6e9ef"
+hint.fg_dim       = "#acb0be"
+hint.accent       = "#7287fd"
+hint.border       = "#e6e9ef"
+hint.outline      = "#7287fd"
+hint.vision       = "#179299"
+hint.flash_bg     = "#fe640b"
+hint.flash_fg     = "#11111b"
+hint.drag_bg      = "#fe640b"
+hint.drag_fg      = "#11111b"
+hint.scroll       = "#1e66f5"
+hint.disabled_bg  = "#ccd0da"
+hint.disabled_fg  = "#5c5f77"
+hint.chip_bg      = "#eff1f5"
+hint.chip_fg      = "#4c4f69"
+hint.chip_border  = "#4c4f69"
+hint.chip_accent  = "#8839ef"
 
 [keys]
 # "auto": label glyphs are what your layout types on the home-row keys

@@ -306,11 +306,11 @@ impl Renderer {
             Some(sub) => format!("{} · {sub}", chip.mode),
             None => chip.mode.clone(),
         };
-        segs.push((mode, tokens.fg));
+        segs.push((mode, tokens.chip_fg));
         if typed_seg {
-            segs.push((chip.typed.clone(), tokens.accent));
+            segs.push((chip.typed.clone(), tokens.chip_accent));
         }
-        segs.push((chip.scope.as_str().to_owned(), tokens.fg));
+        segs.push((chip.scope.as_str().to_owned(), tokens.chip_fg));
         segs.retain(|(s, _)| !s.is_empty());
         let pad = 8;
         let swatch = if chip.swatch { SWATCH + pad / 2 } else { 0 };
@@ -335,8 +335,8 @@ impl Renderer {
             dev,
             hint.radius * g.scale,
             border,
-            tokens.bg,
-            tokens.border,
+            tokens.chip_bg,
+            tokens.chip_border,
             1.0,
         );
 
@@ -352,12 +352,12 @@ impl Renderer {
             }
             let seg = output_to_device(Rect::new(text_x, rect.y, text_w, rect.h), g.scale);
             if let Some((mode, _)) = s.split_once(" · ").filter(|_| i == 0) {
-                // Mode in fg, sub-text dimmed.
+                // Mode in chip_fg, sub-text in chip_border.
                 let n = mode.chars().count();
                 let colors: Vec<Color> = s
                     .chars()
                     .enumerate()
-                    .map(|(k, _)| if k < n { *color } else { tokens.fg_dim })
+                    .map(|(k, _)| if k < n { *color } else { tokens.chip_border })
                     .collect();
                 self.draw_text(pm, seg, s, font_px, &colors, 1.0);
             } else {
@@ -367,7 +367,7 @@ impl Renderer {
             if i + 1 < segs.len() {
                 let div = output_to_device(Rect::new(x, rect.y + 4, 1, rect.h - 8), g.scale);
                 let div = Rect::<Device>::new(div.x, div.y, border, div.h);
-                fill_rect(pm, div, tokens.border);
+                fill_rect(pm, div, tokens.chip_border);
                 x += 1;
             }
         }
@@ -588,8 +588,8 @@ mod tests {
     #[test]
     fn filter_styles() {
         let t = Theme::default().tokens;
-        assert_eq!(count_color(BadgeStyle::Normal, 0, t.accent), 0);
-        assert!(count_color(BadgeStyle::Normal, 1, t.accent) > 0);
+        assert_eq!(count_color(BadgeStyle::Normal, 0, t.fg_dim), 0);
+        assert!(count_color(BadgeStyle::Normal, 1, t.fg_dim) > 0);
         assert!(count_color(BadgeStyle::Flash, 0, t.flash_bg) > 0);
         // Faded badges are translucent: no fully opaque background pixel.
         assert_eq!(count_color(BadgeStyle::Faded, 0, t.bg), 0);
@@ -633,7 +633,9 @@ mod tests {
 
     /// Vision badge at `scale`: (vision-coloured pixels, border-coloured pixels).
     fn vision_render(scale: f32) -> (usize, usize) {
-        let theme = Theme::default();
+        let mut theme = Theme::default();
+        // Distinct from `fg` so label glyphs are not counted as border.
+        theme.tokens.border = Color::hex(0x123456);
         let t = theme.tokens.clone();
         let s = badge_size(2, &theme.hint);
         let badge = |label: &str, x: i32, vision| Badge {
@@ -761,6 +763,46 @@ mod tests {
         let (x, y, w, h) = bbox(&pm);
         assert_eq!(x + w, 200 - 12);
         assert_eq!((y, h), (100 - 12 - 22, 22));
+    }
+
+    #[test]
+    fn default_dark_badge_colours() {
+        let t = Theme::default().tokens;
+        assert_eq!(t.bg, Color::hex(0xa6e3a1));
+        assert_eq!(t.fg, Color::hex(0x181825));
+        assert!(count_color(BadgeStyle::Normal, 0, t.bg) > 0);
+        assert!(count_color(BadgeStyle::Normal, 0, t.fg) > 0);
+    }
+
+    #[test]
+    fn typed_prefix_is_dimmed() {
+        let t = Theme::default().tokens;
+        assert_eq!(count_color(BadgeStyle::Normal, 0, t.fg_dim), 0);
+        assert!(count_color(BadgeStyle::Normal, 1, t.fg_dim) > 0);
+    }
+
+    #[test]
+    fn chip_fill_independent_of_badge_bg() {
+        let theme = Theme::default();
+        assert_ne!(theme.tokens.bg, theme.tokens.chip_bg);
+        let scene = Scene {
+            outputs: vec![],
+            badges: vec![],
+            chip: Some(Chip {
+                mode: "click".into(),
+                sub: None,
+                swatch: false,
+                typed: String::new(),
+                scope: woints_core::Scope::Focused,
+                output: OutputId("T".into()),
+            }),
+            pinned: None,
+            scroll: None,
+            theme: theme.clone(),
+        };
+        let pm = Renderer::new().render(&scene, &output(1.0));
+        assert!(count_rgb(&pm, theme.tokens.chip_bg) > 0);
+        assert_eq!(count_rgb(&pm, theme.tokens.bg), 0);
     }
 
     fn count_rgb(pm: &Pixmap, c: Color) -> usize {

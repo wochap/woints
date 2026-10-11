@@ -190,8 +190,8 @@ autoload -U compinit && compinit
 
 `$XDG_CONFIG_HOME/woints/config.toml` (`~/.config/woints/config.toml`), or
 `wointsd --config PATH`. Every key is optional; [`config.example.toml`](config.example.toml)
-lists all defaults. Sections: `[hint]`, `[timing]`, `[chip]`, `[theme.mocha]`,
-`[theme.latte]`, `[keys]`, `[scope]`, `[vision]`, `[merge]`, `[input]`,
+lists all defaults. Sections: `[hint]`, `[timing]`, `[chip]`, `[theme.dark]`,
+`[theme.light]`, `[keys]`, `[scope]`, `[vision]`, `[merge]`, `[input]`,
 `[actions]`, `[providers.quickshell]`, `[apps]`, `[a11y]`.
 
 - `[a11y]`: `wake_chromium = true` wakes dormant Chromium/Electron
@@ -199,8 +199,14 @@ lists all defaults. Sections: `[hint]`, `[timing]`, `[chip]`, `[theme.mocha]`,
   (case-insensitive) never woken, which get vision instead. Set
   `wake_chromium = false` to turn the wake off.
 
+- `hint.theme = "auto"` (default) picks `[theme.dark]` or `[theme.light]` from
+  the system colour scheme (XDG settings portal `org.freedesktop.appearance`
+  `color-scheme`, followed live; dark when the portal is unavailable);
+  `"dark"` / `"light"` force one. Each table accepts any subset of tokens and
+  keeps the default for the rest. The mode chip has its own `chip_bg`,
+  `chip_fg`, `chip_border` and `chip_accent` tokens.
 - Reload with `woints reload` or `pkill -HUP wointsd`. A file that fails
-  validation is rejected with the key named (`theme.mocha.bg: expected
+  validation is rejected with the key named (`theme.dark.bg: expected
   #rrggbb or #rrggbbaa`) and the previous config stays active; `woints status`
   and `doctor` show the error. Unknown keys only warn.
 - A reload that changes the label alphabet cancels a session on screen; a

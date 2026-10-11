@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::act::{InputConfig, ModifierMap, PointerKind, Prefer};
 use crate::merge::MergeParams;
 use crate::model::{Action, Scope};
-use crate::theme::{ChipLayout, Color, HintLayout, Theme, ThemeName, TimingLayout, Tokens};
+use crate::theme::{ChipLayout, Color, HintLayout, Scheme, Theme, ThemeName, TimingLayout, Tokens};
 
 /// The shipped example, identical to the built-in defaults.
 pub const DEFAULT_TOML: &str = include_str!("../../../config.example.toml");
@@ -235,19 +235,20 @@ impl Default for VisionConfig {
     }
 }
 
-/// `[theme.mocha]`, `[theme.latte]`.
+/// `[theme.dark]`, `[theme.light]`; each table keeps the built-in default for
+/// tokens it leaves out.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Themes {
-    pub mocha: Tokens,
-    pub latte: Tokens,
+    pub dark: Tokens,
+    pub light: Tokens,
 }
 
 impl Default for Themes {
     fn default() -> Self {
         Self {
-            mocha: Tokens::mocha(),
-            latte: Tokens::latte(),
+            dark: Tokens::dark(),
+            light: Tokens::light(),
         }
     }
 }
@@ -497,14 +498,24 @@ pub struct Config {
 }
 
 impl Config {
-    /// Theme for drawing with `alphabet` as the displayed label glyphs.
-    pub fn theme(&self, alphabet: &str) -> Theme {
+    /// Palette scheme `hint.theme` resolves to when the system is `scheme`.
+    pub fn palette(&self, scheme: Scheme) -> Scheme {
+        match self.hint.theme {
+            ThemeName::Auto => scheme,
+            ThemeName::Dark => Scheme::Dark,
+            ThemeName::Light => Scheme::Light,
+        }
+    }
+
+    /// Theme for drawing with `alphabet` as the displayed label glyphs when
+    /// the system colour scheme is `scheme`.
+    pub fn theme(&self, alphabet: &str, scheme: Scheme) -> Theme {
         let mut hint = self.hint.clone();
         hint.alphabet = alphabet.to_owned();
         Theme {
-            tokens: match self.hint.theme {
-                ThemeName::Mocha => self.theme.mocha.clone(),
-                ThemeName::Latte => self.theme.latte.clone(),
+            tokens: match self.palette(scheme) {
+                Scheme::Dark => self.theme.dark.clone(),
+                Scheme::Light => self.theme.light.clone(),
             },
             hint,
             chip: self.chip.clone(),
@@ -570,7 +581,7 @@ pub struct Loaded {
 }
 
 /// Parse and validate config text. Errors name the offending key
-/// (`theme.mocha.bg: expected #rrggbb or #rrggbbaa`); unknown keys are
+/// (`theme.dark.bg: expected #rrggbb or #rrggbbaa`); unknown keys are
 /// returned as warnings.
 pub fn parse(text: &str) -> Result<Loaded, Vec<String>> {
     let mut table: toml::Table = text
@@ -603,7 +614,7 @@ fn overlay(base: &mut toml::Table, user: toml::Table) {
     }
 }
 
-/// The design writes theme tokens as `hint.bg = ...` inside `[theme.mocha]`.
+/// The design writes theme tokens as `hint.bg = ...` inside `[theme.dark]`.
 fn flatten_theme_hint(t: &mut toml::Table) {
     let Some(toml::Value::Table(themes)) = t.get_mut("theme") else {
         return;
@@ -670,8 +681,18 @@ fn validate(t: &toml::Table) -> Vec<String> {
             errs.push("vision.min_atspi_elements: expected an integer >= 0".into());
         }
     }
+    if let Some(v) = get(t, "hint.theme") {
+        if v.as_str()
+            .is_none_or(|s| !matches!(s, "auto" | "dark" | "light"))
+        {
+            errs.push("hint.theme: expected auto, dark or light".into());
+        }
+    }
     if let Some(toml::Value::Table(themes)) = t.get("theme") {
         for (name, theme) in themes {
+            if !matches!(name.as_str(), "dark" | "light") {
+                continue;
+            }
             let Some(tt) = theme.as_table() else {
                 errs.push(format!("theme.{name}: expected a table"));
                 continue;
@@ -773,7 +794,7 @@ mod tests {
         assert_eq!(l.config.hint, d.hint);
         assert_eq!(l.config.timing, d.timing);
         assert_eq!(l.config.chip, d.chip);
-        for (name, tokens) in [("MOCHA", &d.theme.mocha), ("LATTE", &d.theme.latte)] {
+        for (name, tokens) in [("MOCHA", &d.theme.dark), ("LATTE", &d.theme.light)] {
             let tag = format!("const {name} = {{");
             let s = html.find(&tag).unwrap() + tag.len();
             let e = s + html[s..].find('}').unwrap();
@@ -792,27 +813,64 @@ mod tests {
 
     #[test]
     fn partial_file() {
-        let l = parse("[hint]\ntheme = \"latte\"\n").unwrap();
+        let l = parse("[hint]\ntheme = \"light\"\n").unwrap();
         let mut d = Config::default();
-        d.hint.theme = ThemeName::Latte;
+        d.hint.theme = ThemeName::Light;
         assert_eq!(l.config, d);
-        assert_eq!(l.config.theme("asdf").tokens, Tokens::latte());
+        assert_eq!(l.config.theme("asdf", Scheme::Dark).tokens, Tokens::light());
+    }
+
+    #[test]
+    fn auto_follows_scheme() {
+        let c = Config::default();
+        assert_eq!(c.hint.theme, ThemeName::Auto);
+        assert_eq!(c.theme("asdf", Scheme::Dark).tokens, Tokens::dark());
+        assert_eq!(c.theme("asdf", Scheme::Light).tokens, Tokens::light());
+        let forced = parse("[hint]\ntheme = \"dark\"\n").unwrap().config;
+        assert_eq!(forced.theme("asdf", Scheme::Light).tokens, Tokens::dark());
+        assert_eq!(forced.palette(Scheme::Light), Scheme::Dark);
+    }
+
+    #[test]
+    fn defaults_match_vimium_look() {
+        let d = Config::default();
+        assert_eq!(d.hint.prefix_style, crate::theme::PrefixStyle::DimMatched);
+        assert_eq!(d.theme.dark.bg, Color::hex(0xa6e3a1));
+        assert_eq!(d.theme.light.chip_accent, Color::hex(0x8839ef));
+    }
+
+    #[test]
+    fn partial_palette() {
+        let l = parse("[theme.dark]\naccent = \"#ff0000\"\n").unwrap();
+        let mut d = Config::default();
+        d.theme.dark.accent = Color::hex(0xff0000);
+        assert_eq!(l.config, d);
     }
 
     #[test]
     fn design_style_theme_keys() {
-        let l = parse("[theme.mocha]\nhint.bg = \"#000000\"\n").unwrap();
-        assert_eq!(l.config.theme.mocha.bg, Color::hex(0));
-        assert_eq!(l.config.theme.mocha.fg, Tokens::mocha().fg);
+        let l = parse("[theme.dark]\nhint.bg = \"#000000\"\n").unwrap();
+        assert_eq!(l.config.theme.dark.bg, Color::hex(0));
+        assert_eq!(l.config.theme.dark.fg, Tokens::dark().fg);
+    }
+
+    #[test]
+    fn old_theme_names() {
+        assert_eq!(
+            err("[hint]\ntheme = \"mocha\"\n"),
+            ["hint.theme: expected auto, dark or light"]
+        );
+        let l = parse("[theme.mocha]\nbg = \"#000000\"\n").unwrap();
+        assert_eq!(l.warnings, ["theme.mocha: unknown key"]);
     }
 
     #[test]
     fn bad_colour() {
         assert_eq!(
-            err("[theme.mocha]\nbg = \"red\"\n"),
-            ["theme.mocha.bg: expected #rrggbb or #rrggbbaa"]
+            err("[theme.dark]\nbg = \"red\"\n"),
+            ["theme.dark.bg: expected #rrggbb or #rrggbbaa"]
         );
-        assert!(parse("[theme.mocha]\nbg = \"#11111bcc\"\n").is_ok());
+        assert!(parse("[theme.dark]\nbg = \"#11111bcc\"\n").is_ok());
     }
 
     #[test]

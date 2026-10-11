@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use woints_core::config::ProviderMode;
 use woints_core::doctor::{
-    Check, ChromiumState, FocusedFacts, Report, env_checks, focused_checks, wayland_checks,
+    Check, ChromiumState, FocusedFacts, Report, env_checks, focused_checks, scheme_check,
+    wayland_checks,
 };
 use woints_core::ports::Budget;
 use woints_overlay::font::{EMBEDDED_FAMILY, ResolvedFont};
@@ -235,6 +236,9 @@ impl Daemon {
                 .map(|w| Check::warn(format!("config: {w}"))),
         );
         out.push(font_check(&self.settings().font));
+        let (scheme, source) = self.scheme();
+        let palette = self.settings().config.palette(scheme);
+        out.push(scheme_check(scheme, source, palette));
         out
     }
 }

@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::theme::{Scheme, SchemeSource};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -83,6 +85,21 @@ impl Report {
         self.groups()
             .iter()
             .any(|(_, c)| c.iter().any(|c| c.level == Level::Fail))
+    }
+}
+
+/// Config-group line for the detected colour scheme and the palette in use.
+pub fn scheme_check(scheme: Scheme, source: SchemeSource, palette: Scheme) -> Check {
+    match source {
+        SchemeSource::Portal => Check::ok(format!(
+            "scheme: {} (portal), palette: {}",
+            scheme.as_str(),
+            palette.as_str()
+        )),
+        SchemeSource::Fallback => Check::warn(format!(
+            "scheme: dark (fallback; no XDG settings portal answer), palette: {}",
+            palette.as_str()
+        )),
     }
 }
 
@@ -306,6 +323,23 @@ mod tests {
             ..Default::default()
         };
         assert!(r.failed());
+    }
+
+    #[test]
+    fn scheme_lines() {
+        let c = scheme_check(Scheme::Light, SchemeSource::Portal, Scheme::Light);
+        assert_eq!(
+            (c.level, c.message.as_str()),
+            (Level::Ok, "scheme: light (portal), palette: light")
+        );
+        let c = scheme_check(Scheme::Light, SchemeSource::Portal, Scheme::Dark);
+        assert_eq!(c.message, "scheme: light (portal), palette: dark");
+        let c = scheme_check(Scheme::Dark, SchemeSource::Fallback, Scheme::Dark);
+        assert_eq!(c.level, Level::Warn);
+        assert_eq!(
+            c.message,
+            "scheme: dark (fallback; no XDG settings portal answer), palette: dark"
+        );
     }
 
     #[test]

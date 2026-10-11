@@ -4,6 +4,7 @@ mod daemon;
 mod doctor;
 mod keys;
 mod pipeline;
+mod scheme;
 mod server;
 mod session;
 mod store;
@@ -92,6 +93,7 @@ async fn main() -> std::process::ExitCode {
     if let Some(h) = hypr {
         tokio::spawn(hypr_events(daemon.clone(), h));
     }
+    tokio::spawn(scheme::watch(daemon.clone()));
     tokio::spawn(watchdog(daemon.clone()));
     let server = tokio::spawn(server::serve(listener, daemon.clone()));
 

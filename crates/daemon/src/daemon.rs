@@ -20,7 +20,7 @@ use woints_core::proto::{
     ActReply, ActionOutcome, BenchReply, BenchRow, ConfigStatus, HintsReply, OutputInfo,
     ProviderStatus, ReloadReply, Request, Response, SnapshotReply, State, StateReply, StatusReply,
 };
-use woints_core::theme::{Eliminated, Theme};
+use woints_core::theme::{Eliminated, Scheme, SchemeSource, Theme};
 use woints_hypr::{Hypr, HyprSnapshot, Monitor};
 use woints_input::{AbsoluteBackend, Backend, MovecursorBackend, PointerActuator};
 use woints_overlay::font::{self, ResolvedFont, fontdb::Database};
@@ -100,9 +100,14 @@ pub struct Settings {
 impl Settings {
     /// `fonts` is the system font database; `None` (not scanned yet) uses
     /// the embedded font.
-    pub fn new(config: Config, layout: Option<&[Option<char>]>, fonts: Option<&Database>) -> Self {
+    pub fn new(
+        config: Config,
+        scheme: Scheme,
+        layout: Option<&[Option<char>]>,
+        fonts: Option<&Database>,
+    ) -> Self {
         let alphabet = config.alphabet(layout);
-        let mut theme = config.theme(&alphabet);
+        let mut theme = config.theme(&alphabet, scheme);
         let input = config.input_config();
         let hint = &mut theme.hint;
         let resolved = match fonts {
@@ -202,6 +207,8 @@ pub struct Daemon {
     config_status: Mutex<ConfigStatus>,
     /// Home-row glyphs of the active layout, for `keys.mode = "auto"`.
     layout: Mutex<Option<Vec<Option<char>>>>,
+    /// Detected system colour scheme and where it came from.
+    scheme: std::sync::Mutex<(Scheme, SchemeSource)>,
     pub(crate) hypr: Option<Hypr>,
     hypr_version: Mutex<Option<String>>,
     monitors: Mutex<Option<Vec<Monitor>>>,
@@ -290,10 +297,11 @@ impl Daemon {
         };
         let d = Arc::new(Self {
             started: Instant::now(),
-            settings: RwLock::new(Arc::new(Settings::new(config, None, None))),
+            settings: RwLock::new(Arc::new(Settings::new(config, Scheme::Dark, None, None))),
             config_path,
             config_status: Mutex::new(status),
             layout: Mutex::new(None),
+            scheme: std::sync::Mutex::new((Scheme::Dark, SchemeSource::Fallback)),
             hypr,
             hypr_version: Mutex::new(None),
             monitors: Mutex::new(None),
@@ -349,6 +357,24 @@ impl Daemon {
             .clone()
     }
 
+    /// Detected colour scheme and its source.
+    pub fn scheme(&self) -> (Scheme, SchemeSource) {
+        *self.scheme.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Record a newly detected scheme; re-renders a showing session when the
+    /// palette `hint.theme` resolves to changes.
+    pub async fn set_scheme(&self, scheme: Scheme, source: SchemeSource) {
+        let old = {
+            let mut cur = self.scheme.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::replace(&mut *cur, (scheme, source))
+        };
+        let config = self.settings().config.clone();
+        if config.palette(old.0) != config.palette(scheme) {
+            self.install(config).await;
+        }
+    }
+
     fn set_settings(&self, s: Settings) {
         *self.settings.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(s);
     }
@@ -359,7 +385,8 @@ impl Daemon {
         let layout = self.layout.lock().await.clone();
         let old = self.settings();
         let fonts = self.fonts.lock().await.clone();
-        let new = Settings::new(config, layout.as_deref(), fonts.as_deref());
+        let (scheme, _) = self.scheme();
+        let new = Settings::new(config, scheme, layout.as_deref(), fonts.as_deref());
         let alphabet_changed = old.theme.hint.alphabet != new.theme.hint.alphabet;
         let look_changed = old.theme != new.theme;
         let theme = new.theme.clone();
@@ -1301,6 +1328,8 @@ impl Daemon {
                 None => "unavailable".into(),
             },
             config: self.config_status().await,
+            scheme: self.scheme().0,
+            source: self.scheme().1,
             detector,
             onnx,
         })
@@ -1457,6 +1486,7 @@ pub fn percentiles(runs: &[Timings]) -> Vec<BenchRow> {
 mod tests {
     use super::*;
     use woints_core::model::StageTiming;
+    use woints_core::theme::Tokens;
 
     #[test]
     fn percentile_nearest_rank() {
@@ -1500,7 +1530,7 @@ mod tests {
     fn missing_font_uses_embedded_advance() {
         let mut config = Config::default();
         config.hint.font = "NoSuchFont".into();
-        let s = Settings::new(config, None, Some(&Database::new()));
+        let s = Settings::new(config, Scheme::Dark, None, Some(&Database::new()));
         assert!(s.font.missing());
         assert_eq!(s.theme.hint.font_file, None);
         let embedded = font::advance_em(&font::load_file(None), "ASDFGHJKL");
@@ -1543,22 +1573,22 @@ mod tests {
 
     #[tokio::test]
     async fn reload_keeps_last_good() {
-        let p = temp_config("reload", "[hint]\ntheme = \"latte\"\n");
+        let p = temp_config("reload", "[hint]\ntheme = \"light\"\n");
         let d = demo_with(Some(p.clone()));
         assert_eq!(
             d.settings().theme.tokens,
-            woints_core::theme::Tokens::latte()
+            woints_core::theme::Tokens::light()
         );
         let loaded_at = d.config_status().await.loaded_at;
-        std::fs::write(&p, "[theme.mocha]\nbg = \"red\"\n").unwrap();
+        std::fs::write(&p, "[theme.dark]\nbg = \"red\"\n").unwrap();
         let r = d.handle(Request::Reload).await;
         assert_eq!(
             r.error.as_deref(),
-            Some("theme.mocha.bg: expected #rrggbb or #rrggbbaa")
+            Some("theme.dark.bg: expected #rrggbb or #rrggbbaa")
         );
         assert_eq!(
             d.settings().theme.tokens,
-            woints_core::theme::Tokens::latte()
+            woints_core::theme::Tokens::light()
         );
         let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
         assert!(!s.config.errors.is_empty());
@@ -1589,6 +1619,45 @@ mod tests {
         assert!(d.handle(Request::Reload).await.ok);
         assert_eq!(d.state().await, State::Idle);
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn auto_theme_follows_scheme() {
+        let d = demo();
+        assert_eq!(d.scheme(), (Scheme::Dark, SchemeSource::Fallback));
+        assert_eq!(d.settings().theme.tokens, Tokens::dark());
+        d.set_scheme(Scheme::Light, SchemeSource::Portal).await;
+        assert_eq!(d.settings().theme.tokens, Tokens::light());
+        let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
+        assert_eq!((s.scheme, s.source), (Scheme::Light, SchemeSource::Portal));
+    }
+
+    #[tokio::test]
+    async fn forced_palette_ignores_scheme() {
+        let p = temp_config("forced", "[hint]\ntheme = \"dark\"\n");
+        let d = demo_with(Some(p.clone()));
+        d.set_scheme(Scheme::Light, SchemeSource::Portal).await;
+        assert_eq!(d.settings().theme.tokens, Tokens::dark());
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn scheme_flip_keeps_showing_session() {
+        let d = demo();
+        let id = d.store.lock().await.insert(vec![element(1), element(2)]);
+        d.apply(Input::Shown {
+            snapshot_id: id,
+            labels: vec!["aa".into(), "as".into()],
+            action: Action::Click,
+            explicit: false,
+        })
+        .await;
+        d.apply(Input::Glyph('a', None)).await;
+        d.set_scheme(Scheme::Light, SchemeSource::Portal).await;
+        assert_eq!(d.state().await, State::Showing);
+        assert_eq!(d.settings().theme.tokens, Tokens::light());
+        let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
+        assert_eq!(s.state, State::Showing);
     }
 
     fn element(id: u32) -> Element {

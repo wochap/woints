@@ -11,6 +11,7 @@ use crate::doctor::Report;
 use crate::geom::{Global, OutputId, Rect};
 use crate::model::{Action, Element, ElementId, Scope, Target, Timings};
 use crate::ports::CollectReport;
+use crate::theme::{Scheme, SchemeSource};
 use crate::vision::VisionReport;
 
 /// Socket file name under `$XDG_RUNTIME_DIR`.
@@ -198,6 +199,12 @@ pub struct StatusReply {
     pub clipboard: String,
     #[serde(default)]
     pub config: ConfigStatus,
+    /// Detected system colour scheme.
+    #[serde(default)]
+    pub scheme: Scheme,
+    /// Where `scheme` came from.
+    #[serde(default)]
+    pub source: SchemeSource,
     /// `classical`, `onnx`, `onnx+classical` or `classical (onnx unavailable)`.
     #[serde(default)]
     pub detector: String,

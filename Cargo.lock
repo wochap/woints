@@ -2097,6 +2097,7 @@ name = "woints-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "serde",
  "serde_json",
  "tokio",
@@ -2110,6 +2111,7 @@ dependencies = [
  "woints-qs",
  "woints-vision",
  "xkbcommon",
+ "zbus",
 ]
 
 [[package]]

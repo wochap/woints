@@ -187,7 +187,9 @@ mod tests {
         assert!(r.found && !r.missing());
         assert_eq!(
             r.path.as_deref(),
-            Some(std::path::Path::new("/fonts/Iosevka Nerd Font Mono-700.ttf"))
+            Some(std::path::Path::new(
+                "/fonts/Iosevka Nerd Font Mono-700.ttf"
+            ))
         );
     }
 

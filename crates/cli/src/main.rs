@@ -233,6 +233,7 @@ fn print_human(req: &Request, resp: &Response) {
                         format!(" (last reload failed: {})", s.config.errors.join("; "))
                     }
                 );
+                println!("scheme    {} ({})", s.scheme.as_str(), s.source.as_str());
                 if !s.last_timings.0.is_empty() {
                     println!("last hints:");
                     for t in &s.last_timings.0 {
