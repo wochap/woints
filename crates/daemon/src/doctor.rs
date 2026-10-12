@@ -11,7 +11,10 @@ use woints_core::doctor::{
 use woints_core::ports::Budget;
 use woints_overlay::font::{EMBEDDED_FAMILY, ResolvedFont};
 
+use woints_core::proto::State;
+
 use crate::daemon::{Daemon, Provider};
+use crate::keys::Keys;
 
 /// Hyprland version woints was verified against.
 const VERIFIED_HYPRLAND: &str = "0.56.2";
@@ -159,13 +162,23 @@ impl Daemon {
                 "not running under Hyprland (HYPRLAND_INSTANCE_SIGNATURE unset)",
             )];
         }
-        vec![match self.hyprland_version_pub().await {
+        let version = match self.hyprland_version_pub().await {
             Some(v) if v == VERIFIED_HYPRLAND => Check::ok(format!("Hyprland {v}")),
             Some(v) => Check::warn(format!(
                 "Hyprland {v}; verified against {VERIFIED_HYPRLAND}"
             )),
             None => Check::warn("Hyprland version unknown"),
-        }]
+        };
+        let current = match &self.hypr {
+            Some(h) => h.current_submap().await.ok().flatten(),
+            None => None,
+        };
+        let idle = self.state().await == State::Idle;
+        let prefix = self.settings().input.submap.clone();
+        vec![
+            version,
+            keys_check(&self.keys(), current.as_deref(), &prefix, idle),
+        ]
     }
 
     /// ONNX detector section (M6).
@@ -243,6 +256,22 @@ impl Daemon {
     }
 }
 
+/// Hyprland-group line for the key source, and a stuck-submap warning when
+/// Hyprland sits in a woints submap with no session.
+fn keys_check(keys: &Keys, current: Option<&str>, prefix: &str, idle: bool) -> Check {
+    let stuck = current.filter(|c| idle && c.starts_with(&format!("{prefix}-")));
+    match (stuck, keys) {
+        (Some(c), _) => Check::warn(format!(
+            "keys: Hyprland is in submap {c} with no session; run `hyprctl dispatch submap reset`"
+        )),
+        (None, Keys::Overlay { reason: Some(_) }) => {
+            Check::warn(format!("keys: {}", keys.describe()))
+        }
+        (None, Keys::Unavailable(_)) => Check::fail(format!("keys: {}", keys.describe())),
+        (None, _) => Check::ok(format!("keys: {}", keys.describe())),
+    }
+}
+
 /// Config-group line for the hint font in use.
 fn font_check(f: &ResolvedFont) -> Check {
     match &f.path {
@@ -262,6 +291,33 @@ mod tests {
     use woints_core::doctor::Level;
 
     use super::*;
+
+    #[test]
+    fn keys_lines() {
+        let overlay = Keys::Overlay { reason: None };
+        let c = keys_check(&overlay, None, "woints-keys", true);
+        assert_eq!((c.level, c.message.as_str()), (Level::Ok, "keys: overlay"));
+        let fell = Keys::Overlay {
+            reason: Some("eval failed".into()),
+        };
+        let c = keys_check(&fell, None, "woints-keys", true);
+        assert_eq!(c.level, Level::Warn);
+        assert_eq!(c.message, "keys: overlay (eval failed)");
+        let c = keys_check(&overlay, Some("woints-keys-3fa9c1d2"), "woints-keys", true);
+        assert_eq!(c.level, Level::Warn);
+        assert!(c.message.contains("hyprctl dispatch submap reset"));
+        let c = keys_check(&overlay, Some("woints-keys-3fa9c1d2"), "woints-keys", false);
+        assert_eq!(c.level, Level::Ok);
+        let c = keys_check(&overlay, Some("woints"), "woints-keys", true);
+        assert_eq!(c.level, Level::Ok);
+        let off = Keys::Unavailable("submap install failed: eval failed".into());
+        let c = keys_check(&off, None, "woints-keys", true);
+        assert_eq!(c.level, Level::Fail);
+        assert_eq!(
+            c.message,
+            "keys: unavailable (submap install failed: eval failed)"
+        );
+    }
 
     #[test]
     fn font_lines() {

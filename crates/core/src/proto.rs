@@ -211,6 +211,9 @@ pub struct StatusReply {
     /// `loaded <path> ep=<ep>` or `unavailable (<reason>)`; absent when unused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onnx: Option<String>,
+    /// `submap <name>`, `overlay` or `overlay (<reason>)`.
+    #[serde(default)]
+    pub keys: String,
 }
 
 /// Which config is in effect and what went wrong with the last load.

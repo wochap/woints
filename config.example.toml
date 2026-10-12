@@ -115,6 +115,8 @@ drag_steps     = 8
 scroll_step    = 3
 unmap_timeout_ms = 200
 modifiers      = { shift = "right", ctrl = "middle", alt = "hover", super = "none" }
+keys           = "auto"       # "auto" (Hyprland submap, else overlay) | "submap" | "overlay"
+submap         = "woints-keys" # submap name prefix; the daemon appends a hash of its bind table
 
 [actions]
 default = "click"

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::act::{InputConfig, ModifierMap, PointerKind, Prefer};
+use crate::act::{InputConfig, KeysChoice, ModifierMap, PointerKind, Prefer};
 use crate::merge::MergeParams;
 use crate::model::{Action, Scope};
 use crate::theme::{ChipLayout, Color, HintLayout, Scheme, Theme, ThemeName, TimingLayout, Tokens};
@@ -358,6 +358,9 @@ pub struct InputSection {
     pub unmap_timeout_ms: u32,
     /// Modifier → action name or `"none"`.
     pub modifiers: BTreeMap<String, String>,
+    pub keys: KeysChoice,
+    /// Name of the Hyprland submap that captures keys.
+    pub submap: String,
 }
 
 /// `input.prefer`: `"action"` (AT-SPI first) or `"pointer"`.
@@ -391,6 +394,8 @@ impl Default for InputSection {
             scroll_step: i.scroll_step,
             unmap_timeout_ms: i.unmap_timeout_ms,
             modifiers,
+            keys: i.keys,
+            submap: i.submap,
         }
     }
 }
@@ -541,6 +546,8 @@ impl Config {
             // Validated on load.
             modifiers: ModifierMap::from_pairs(pairs).unwrap_or_default(),
             default_action: self.actions.default,
+            keys: i.keys,
+            submap: i.submap.clone(),
         }
     }
 
@@ -718,6 +725,27 @@ fn validate(t: &toml::Table) -> Vec<String> {
                 }
             }
             None => errs.push("input.modifiers: expected a table".into()),
+        }
+    }
+    if let Some(v) = get(t, "input.keys") {
+        if v.as_str()
+            .is_none_or(|s| !matches!(s, "auto" | "submap" | "overlay"))
+        {
+            errs.push("input.keys: expected auto, submap or overlay".into());
+        }
+    }
+    if let Some(v) = get(t, "input.submap") {
+        let ok = |s: &str| {
+            !s.is_empty()
+                && s != "reset"
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        };
+        if v.as_str().is_none_or(|s| !ok(s)) {
+            errs.push(
+                "input.submap: expected a name of letters, digits, '-' and '_' (not \"reset\")"
+                    .into(),
+            );
         }
     }
     if let Some(v) = get(t, "scope.default") {
@@ -911,6 +939,24 @@ mod tests {
             err("[input]\nmodifiers = { hyper = \"click\" }\n"),
             ["input.modifiers.hyper: unknown modifier"]
         );
+    }
+
+    #[test]
+    fn input_keys_defaults_and_validation() {
+        let i = parse("").unwrap().config.input_config();
+        assert_eq!(i.keys, KeysChoice::Auto);
+        assert_eq!(i.submap, "woints-keys");
+        let i = parse("[input]\nkeys = \"overlay\"\nsubmap = \"mine\"\n")
+            .unwrap()
+            .config
+            .input_config();
+        assert_eq!(i.keys, KeysChoice::Overlay);
+        assert_eq!(i.submap, "mine");
+        assert_eq!(
+            err("[input]\nkeys = \"magic\"\n"),
+            ["input.keys: expected auto, submap or overlay"]
+        );
+        assert_eq!(err("[input]\nsubmap = \"a b\"\n").len(), 1);
     }
 
     #[test]

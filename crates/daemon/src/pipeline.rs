@@ -367,6 +367,7 @@ pub fn second_scene(
         &mut timings,
     );
     scene.theme = theme.clone();
+    scene.keyboard = first.keyboard;
     let mut labels = rest_labels;
     labels.insert(source, String::new());
     if let Some(b) = first.badges.iter().find(|b| b.label == source_label) {
@@ -482,6 +483,7 @@ pub fn build_scene(
             output,
         }),
         theme: theme.clone(),
+        keyboard: false,
     };
     (scene, label_strs)
 }

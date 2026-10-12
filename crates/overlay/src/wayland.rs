@@ -181,6 +181,8 @@ pub(crate) struct State {
     /// Keyboard `leave`/`enter` surfaces seen in the current dispatch.
     focus_left: Vec<ObjectId>,
     focus_entered: Vec<ObjectId>,
+    /// The current scene takes exclusive keyboard focus.
+    grab_keys: bool,
     pending: Option<PendingReply>,
     events: mpsc::UnboundedSender<OverlayEvent>,
     warned_mm: Vec<OutputId>,
@@ -312,6 +314,7 @@ impl State {
             surfaces: Vec::new(),
             focus_left: Vec::new(),
             focus_entered: Vec::new(),
+            grab_keys: false,
             pending: None,
             events,
             warned_mm: Vec::new(),
@@ -487,6 +490,7 @@ impl State {
         if let Some(p) = self.pending.take() {
             let _ = p.reply.send(Err(OverlayError::Other("superseded".into())));
         }
+        self.grab_keys = scene.keyboard;
         let mut wanted: Vec<OutputId> = scene.badges.iter().map(|b| b.output.clone()).collect();
         if let Some(c) = &scene.chip {
             wanted.push(c.output.clone());
@@ -510,6 +514,10 @@ impl State {
         }
         for s in &mut self.surfaces {
             s.drawn = false;
+        }
+        for s in &self.surfaces {
+            s.layer
+                .set_keyboard_interactivity(interactivity(self.grab_keys));
         }
         self.scene = Some(scene);
         self.pending = Some(PendingReply {
@@ -545,7 +553,7 @@ impl State {
         );
         layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
         layer.set_exclusive_zone(-1);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        layer.set_keyboard_interactivity(interactivity(self.grab_keys));
         // Empty input region: pointer events pass through to the windows below.
         match Region::new(&self.compositor) {
             Ok(r) => layer.wl_surface().set_input_region(Some(r.wl_region())),
@@ -576,7 +584,7 @@ impl State {
             .iter()
             .map(|s| s.layer.wl_surface().id())
             .collect();
-        let lost = focus_lost(&self.focus_left, &self.focus_entered, &live);
+        let lost = focus_lost(self.grab_keys, &self.focus_left, &self.focus_entered, &live);
         self.focus_left.clear();
         self.focus_entered.clear();
         if lost {
@@ -878,7 +886,7 @@ impl KeyboardHandler for State {
         _: u32,
         ev: KeyEvent,
     ) {
-        if self.surfaces.is_empty() {
+        if self.surfaces.is_empty() || !self.grab_keys {
             return;
         }
         if ev.keysym == Keysym::Escape {
@@ -1006,11 +1014,25 @@ impl Dispatch<wp_viewport::WpViewport, ()> for State {
     }
 }
 
+fn interactivity(keyboard: bool) -> KeyboardInteractivity {
+    if keyboard {
+        KeyboardInteractivity::Exclusive
+    } else {
+        KeyboardInteractivity::None
+    }
+}
+
 /// Whether one dispatch's keyboard `leave`/`enter` events end the session:
 /// focus left a live woints surface and entered none. Leaves of surfaces
 /// woints already removed, and any leave with no surfaces showing, keep it.
-pub(crate) fn focus_lost<T: PartialEq>(left: &[T], entered: &[T], live: &[T]) -> bool {
-    if live.is_empty() || entered.iter().any(|e| live.contains(e)) {
+/// Without keyboard interactivity focus changes are never the user leaving.
+pub(crate) fn focus_lost<T: PartialEq>(
+    keyboard: bool,
+    left: &[T],
+    entered: &[T],
+    live: &[T],
+) -> bool {
+    if !keyboard || live.is_empty() || entered.iter().any(|e| live.contains(e)) {
         return false;
     }
     left.iter().any(|l| live.contains(l))
@@ -1172,22 +1194,27 @@ mod tests {
 
     #[test]
     fn focus_leave_without_enter_cancels() {
-        assert!(focus_lost(&[1], &[], &[1, 2]));
+        assert!(focus_lost(true, &[1], &[], &[1, 2]));
     }
 
     #[test]
     fn focus_moving_between_woints_surfaces_keeps() {
-        assert!(!focus_lost(&[1], &[2], &[1, 2]));
+        assert!(!focus_lost(true, &[1], &[2], &[1, 2]));
     }
 
     #[test]
     fn focus_leave_of_removed_surface_keeps() {
-        assert!(!focus_lost(&[3], &[], &[1, 2]));
+        assert!(!focus_lost(true, &[3], &[], &[1, 2]));
+    }
+
+    #[test]
+    fn focus_loss_ignored_without_keyboard() {
+        assert!(!focus_lost(false, &[1], &[], &[1, 2]));
     }
 
     #[test]
     fn focus_leave_with_no_surfaces_keeps() {
-        assert!(!focus_lost(&[1], &[], &[]));
+        assert!(!focus_lost(true, &[1], &[], &[]));
     }
 
     #[test]

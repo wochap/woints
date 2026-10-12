@@ -216,6 +216,37 @@ lists all defaults. Sections: `[hint]`, `[timing]`, `[chip]`, `[theme.dark]`,
   and recompiled on layout switches; `"explicit"` uses `keys.alphabet`.
   Punctuation is dropped. Keys always match by physical key.
 
+## Key capture
+
+By default (`input.keys = "auto"`) hint keys come from a Hyprland submap, not
+from a focused overlay surface, so the focused window keeps keyboard focus and
+popups (a `<select>` list, a GTK menu) stay open while hints show. At start-up
+and on layout or config changes `wointsd` defines a submap named
+`<input.submap>-<hash>` (default `woints-keys-…`) with a bind for each label
+key, `h j k l`, the arrows, Backspace and Tab, each also with Shift, Ctrl, Alt
+and Super. The binds send their key over Hyprland's `event` dispatcher and the
+daemon reads them from the event socket. A session enters the submap when hints
+show and leaves it when they go. woints never removes binds: a changed table
+gets a new submap name, and Hyprland drops the old ones on its next reload.
+
+`input.keys = "overlay"` restores the old behaviour (the overlay takes
+exclusive keyboard focus). `"auto"` falls back to it when the submap can't be
+installed, and `woints status` / `woints doctor` show the reason.
+
+Stuck-state guarantees, each independent of the others:
+
+- Escape and any key outside the table (a catchall bind) reset the submap in
+  Hyprland itself, without the daemon.
+- On Lua-config builds a Hyprland-side timer resets it
+  `timing.max_showing_ms` + 2 s after the last state change.
+- The daemon leaves the submap on every way out of a session: selection,
+  Escape, cancel, watchdog, quit, overlay loss, a click on another window
+  (active window change), a lost event socket and a Hyprland config reload.
+- `wointsd` resets a leftover `woints-keys-…` submap when it starts.
+
+If Hyprland is ever left in the submap, run `hyprctl dispatch submap reset`;
+`woints doctor` flags this state.
+
 ## Actions
 
 | action | what happens | actuator |

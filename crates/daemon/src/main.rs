@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
-use woints_core::ports::OverlayEvent;
+use woints_core::ports::{OverlayEvent, OverlayKeys};
 use woints_core::proto::socket_path;
 use woints_hypr::{Event, Hypr};
 
@@ -38,8 +38,11 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("usage: wointsd [--config PATH]");
+        println!("usage: wointsd [--config PATH] [--print-submap]");
         return std::process::ExitCode::SUCCESS;
+    }
+    if args.iter().any(|a| a == "--print-submap") {
+        return print_submap(&args).await;
     }
     let config_path = match args.iter().position(|a| a == "--config") {
         Some(i) => match args.get(i + 1) {
@@ -85,6 +88,7 @@ async fn main() -> std::process::ExitCode {
     let (daemon, overlay_rx) = Daemon::new(hypr.clone(), config_path);
     daemon.load_fonts().await;
     daemon.refresh_layout().await;
+    daemon.setup_keys().await;
     if let Err(e) = daemon.start_overlay().await {
         tracing::error!("overlay unavailable at startup: {e}");
     }
@@ -125,15 +129,12 @@ async fn main() -> std::process::ExitCode {
 async fn overlay_events(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<OverlayEvent>) {
     while let Some(ev) = rx.recv().await {
         match ev {
-            OverlayEvent::Escaped => daemon.apply(Input::Escape).await,
-            OverlayEvent::FocusLost => daemon.apply(Input::Cancel).await,
-            OverlayEvent::Key(k) => {
-                tracing::debug!(keycode = k.keycode, keysym = k.keysym, utf8 = ?k.utf8, "key");
-                if let Some(input) = daemon.key_input(&k).await {
-                    daemon.apply(input).await;
+            OverlayEvent::Gone(reason) => daemon.overlay_gone(&reason).await,
+            ev => {
+                if let Some(ev) = OverlayKeys::map(ev) {
+                    daemon.key_event(ev).await;
                 }
             }
-            OverlayEvent::Gone(reason) => daemon.overlay_gone(&reason).await,
         }
     }
 }
@@ -149,8 +150,11 @@ async fn hypr_events(daemon: Arc<Daemon>, hypr: Hypr) {
                         daemon.apply(Input::MonitorsChanged).await;
                     }
                     Ok(Some(Event::FocusedMon { .. })) => daemon.invalidate_monitors().await,
-                    Ok(Some(Event::ActiveLayout { .. })) => daemon.refresh_layout().await,
-                    Ok(Some(_)) => {}
+                    Ok(Some(Event::ActiveLayout { .. })) => {
+                        daemon.refresh_layout().await;
+                        daemon.setup_keys().await;
+                    }
+                    Ok(Some(ev)) => daemon.hypr_event(&ev).await,
                     Ok(None) => break,
                     Err(e) => {
                         tracing::warn!("hyprland event socket: {e}");
@@ -160,6 +164,7 @@ async fn hypr_events(daemon: Arc<Daemon>, hypr: Hypr) {
             },
             Err(e) => tracing::warn!("hyprland event socket: {e}"),
         }
+        daemon.events_lost().await;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
@@ -172,4 +177,38 @@ async fn watchdog(daemon: Arc<Daemon>) {
             Duration::from_millis(u64::from(daemon.settings().theme.timing.max_showing_ms));
         daemon.apply(Input::Tick { max_showing }).await;
     }
+}
+
+/// `--print-submap`: print the bind scripts for the current layout without
+/// sending anything to Hyprland's `eval`.
+async fn print_submap(args: &[String]) -> std::process::ExitCode {
+    let fail = |m: String| {
+        eprintln!("wointsd: {m}");
+        std::process::ExitCode::from(1)
+    };
+    let path = match args.iter().position(|a| a == "--config") {
+        Some(i) => args.get(i + 1).map(std::path::PathBuf::from),
+        None => woints_core::config::default_path(),
+    };
+    let (config, _) = daemon::initial_config(path.as_deref());
+    let hypr = match Hypr::from_env() {
+        Ok(h) => h,
+        Err(e) => return fail(e.to_string()),
+    };
+    let kbs = match hypr.keyboards().await {
+        Ok(k) => k,
+        Err(e) => return fail(e.to_string()),
+    };
+    let Some(kb) = keys::main_keyboard(&kbs) else {
+        return fail("no keyboard".into());
+    };
+    let layout = keys::layout_glyphs(kb);
+    let alphabet = config.alphabet(layout.as_deref());
+    let input = config.input_config();
+    let Some((table, _)) = keys::bind_table(&input.submap, kb, &alphabet) else {
+        return fail("keymap unavailable".into());
+    };
+    println!("# Lua (hyprctl eval)\n{}\n", table.lua_script());
+    println!("# legacy\n{}", table.legacy_batch());
+    std::process::ExitCode::SUCCESS
 }

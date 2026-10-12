@@ -241,6 +241,20 @@ impl ModifierMap {
     }
 }
 
+/// `input.keys`: where session keys come from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeysChoice {
+    /// The Hyprland submap when it installs, else the overlay.
+    #[default]
+    Auto,
+    Submap,
+    Overlay,
+}
+
+/// Name of the Hyprland submap woints defines (`input.submap`).
+pub const DEFAULT_SUBMAP: &str = "woints-keys";
+
 /// `[input]` and `actions.default`, with their defaults.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputConfig {
@@ -253,6 +267,8 @@ pub struct InputConfig {
     pub unmap_timeout_ms: u32,
     pub modifiers: ModifierMap,
     pub default_action: Action,
+    pub keys: KeysChoice,
+    pub submap: String,
 }
 
 impl Default for InputConfig {
@@ -267,6 +283,8 @@ impl Default for InputConfig {
             unmap_timeout_ms: 200,
             modifiers: ModifierMap::default(),
             default_action: Action::Click,
+            keys: KeysChoice::Auto,
+            submap: DEFAULT_SUBMAP.into(),
         }
     }
 }

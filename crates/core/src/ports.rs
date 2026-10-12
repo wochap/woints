@@ -190,6 +190,8 @@ pub struct Scene {
     /// Scroll mode frame; badges are hidden while set.
     pub scroll: Option<ScrollFrame>,
     pub theme: Theme,
+    /// The surfaces take exclusive keyboard focus (key source `overlay`).
+    pub keyboard: bool,
 }
 
 /// Per-stage timings reported by the overlay for one show/update.
@@ -228,6 +230,52 @@ pub enum OverlayEvent {
     FocusLost,
     /// The overlay thread stopped (Wayland disconnect or panic).
     Gone(String),
+}
+
+/// Session input from a [`KeySource`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyEvent {
+    Key(KeyPress),
+    /// Escape pressed: idle, or drag phase 1 from phase 2.
+    Escape,
+    /// The source can no longer deliver keys (the reason is for the log).
+    Ended(String),
+}
+
+/// Where a session's keys come from. The adapter turns the events it is fed
+/// into [`KeyEvent`]s for the daemon.
+pub trait KeySource {
+    /// `submap <name>` or `overlay`.
+    fn kind(&self) -> String;
+    /// Start capturing for the session state identified by `token`.
+    fn begin(&self, token: u64) -> impl Future<Output = ()> + Send;
+    /// Stop capturing; idempotent.
+    fn end(&self) -> impl Future<Output = ()> + Send;
+}
+
+/// Maps the overlay's own key events to [`KeyEvent`]s; the overlay holds the
+/// keyboard itself, so `begin` and `end` have nothing to do.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OverlayKeys;
+
+impl OverlayKeys {
+    /// `None` for [`OverlayEvent::Gone`], which is not a key.
+    pub fn map(ev: OverlayEvent) -> Option<KeyEvent> {
+        match ev {
+            OverlayEvent::Key(k) => Some(KeyEvent::Key(k)),
+            OverlayEvent::Escaped => Some(KeyEvent::Escape),
+            OverlayEvent::FocusLost => Some(KeyEvent::Ended("keyboard focus lost".into())),
+            OverlayEvent::Gone(_) => None,
+        }
+    }
+}
+
+impl KeySource for OverlayKeys {
+    fn kind(&self) -> String {
+        "overlay".into()
+    }
+    async fn begin(&self, _token: u64) {}
+    async fn end(&self) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

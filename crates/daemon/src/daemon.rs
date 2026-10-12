@@ -2,32 +2,34 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use woints_a11y::{A11yConnection, AtspiActuator, AtspiProvider};
-use woints_core::act::{ActuatorKind, ActuatorRouting, Axis, InputConfig, PointerKind};
+use woints_core::act::{ActuatorKind, ActuatorRouting, Axis, InputConfig, KeysChoice, PointerKind};
 use woints_core::config::{self as cfg, Config, ProviderMode, VisionMode};
 use woints_core::geom::{OutputId, pick_output};
 use woints_core::model::{Action, Element, ElementId, ElementSource, Scope, Target, Timings};
 use woints_core::ports::{
-    ActError, Actuator, Budget, CollectReport, Collected, ElementProvider, KeyPress, Overlay,
-    OverlayError, OverlayEvent, ProviderError, Scene, ScrollFrame,
+    ActError, Actuator, Budget, CollectReport, Collected, ElementProvider, KeyEvent, KeyPress,
+    Overlay, OverlayError, OverlayEvent, ProviderError, Scene, ScrollFrame,
 };
 use woints_core::proto::{
     ActReply, ActionOutcome, BenchReply, BenchRow, ConfigStatus, HintsReply, OutputInfo,
     ProviderStatus, ReloadReply, Request, Response, SnapshotReply, State, StateReply, StatusReply,
 };
 use woints_core::theme::{Eliminated, Scheme, SchemeSource, Theme};
-use woints_hypr::{Hypr, HyprSnapshot, Monitor};
+use woints_hypr::{Event, Hypr, HyprSnapshot, Keyboard, Monitor, SubmapKeys};
 use woints_input::{AbsoluteBackend, Backend, MovecursorBackend, PointerActuator};
 use woints_overlay::font::{self, ResolvedFont, fontdb::Database};
 use woints_overlay::render::{OutputSurface, Renderer};
 use woints_overlay::{OverlayHandle, PointerLink};
 use woints_qs::QuickshellIpcProvider;
 
+use crate::keys::Keys;
 use crate::pipeline::{self, DemoProvider, NoLayers};
 use crate::session::{Effect, Input, Session};
 use crate::store::SnapshotStore;
@@ -236,6 +238,12 @@ pub struct Daemon {
     first: Mutex<Option<Shown>>,
     /// Keycode → label glyph, learned from the overlay's key reports.
     keymap: Mutex<HashMap<u32, char>>,
+    /// The main keyboard, for the submap's bind table.
+    keyboard: Mutex<Option<Keyboard>>,
+    keys: std::sync::Mutex<Keys>,
+    key_token: AtomicU64,
+    /// Active window when the session started (submap keys only).
+    session_window: Mutex<Option<String>>,
     pub shutdown: Notify,
 }
 
@@ -324,6 +332,10 @@ impl Daemon {
             shown: Mutex::new(None),
             first: Mutex::new(None),
             keymap: Mutex::new(HashMap::new()),
+            keyboard: Mutex::new(None),
+            keys: std::sync::Mutex::new(Keys::Overlay { reason: None }),
+            key_token: AtomicU64::new(0),
+            session_window: Mutex::new(None),
             shutdown: Notify::new(),
         });
         (d, rx)
@@ -465,6 +477,7 @@ impl Daemon {
                 *self.config_status.lock().await = status.clone();
                 self.scan_fonts().await;
                 self.install(l.config).await;
+                self.setup_keys().await;
                 tracing::info!(source = %status.source, "config reloaded");
                 Response::with(&ReloadReply { config: status })
             }
@@ -487,7 +500,11 @@ impl Daemon {
     pub async fn refresh_layout(&self) {
         let Some(h) = &self.hypr else { return };
         let glyphs = match h.keyboards().await {
-            Ok(kbs) => crate::keys::main_keyboard(&kbs).and_then(crate::keys::layout_glyphs),
+            Ok(kbs) => {
+                let kb = crate::keys::main_keyboard(&kbs);
+                *self.keyboard.lock().await = kb.cloned();
+                kb.and_then(crate::keys::layout_glyphs)
+            }
             Err(e) => {
                 tracing::warn!("keyboard layout: {e}");
                 None
@@ -539,6 +556,7 @@ impl Daemon {
             tokio::task::spawn_blocking(move || drop(h));
         }
         drop(slot);
+        self.end_keys().await;
         self.apply(Input::Escape).await;
     }
 
@@ -573,6 +591,9 @@ impl Daemon {
 
     /// Feed the session FSM and perform its effects in order.
     pub async fn apply(&self, input: Input) {
+        if input == Input::Quit {
+            self.end_keys().await;
+        }
         let mut s = self.session.lock().await;
         let (next, effects) = s.transition(input, Instant::now(), self.flash_ms());
         *s = next;
@@ -580,6 +601,10 @@ impl Daemon {
         let acting = effects
             .iter()
             .any(|e| matches!(e, Effect::Act { .. } | Effect::Drag { .. }));
+        if acting {
+            // Before the action: the target window must see its own keys again.
+            self.end_keys().await;
+        }
         for e in effects {
             match e {
                 Effect::Redraw(f) => {
@@ -607,6 +632,7 @@ impl Daemon {
                     tokio::time::sleep(Duration::from_millis(u64::from(self.flash_ms()))).await;
                 }
                 Effect::Hide => {
+                    self.end_keys().await;
                     *self.shown.lock().await = None;
                     *self.first.lock().await = None;
                     if acting {
@@ -672,6 +698,7 @@ impl Daemon {
                     if let Some(f) = first {
                         self.update_overlay(f.scene.clone()).await;
                         *self.shown.lock().await = Some(f);
+                        self.begin_keys().await;
                     }
                 }
             }
@@ -728,6 +755,8 @@ impl Daemon {
         let mut s = self.session.lock().await;
         let (next, _) = s.transition(Input::SecondShown { labels }, Instant::now(), 0);
         *s = next;
+        drop(s);
+        self.begin_keys().await;
     }
 
     /// Scroll mode: stroke (and rail) around the container, cursor on it.
@@ -756,6 +785,150 @@ impl Daemon {
         };
         if let Err(err) = r {
             tracing::warn!(element = e.id.0, "scroll mode: {err}");
+        }
+        self.begin_keys().await;
+    }
+
+    pub(crate) fn keys(&self) -> Keys {
+        self.keys.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_keys(&self, keys: Keys) {
+        *self.keys.lock().unwrap_or_else(|e| e.into_inner()) = keys;
+    }
+
+    /// Start capturing keys for the state just shown (re-arms the timer).
+    async fn begin_keys(&self) {
+        let token = self.key_token.fetch_add(1, Ordering::Relaxed) + 1;
+        self.keys().begin(token).await;
+    }
+
+    async fn end_keys(&self) {
+        self.keys().end().await;
+    }
+
+    /// Address of the focused window, when keys come from a submap.
+    async fn active_address(&self) -> Option<String> {
+        if self.keys().overlay() {
+            return None;
+        }
+        let h = self.hypr.as_ref()?;
+        h.active_window().await.ok().flatten().map(|c| c.address)
+    }
+
+    /// Pick the key source per `input.keys` and install its binds. A session
+    /// in progress is cancelled first, since its source is about to change.
+    pub async fn setup_keys(&self) {
+        if self.state().await != State::Idle {
+            self.apply(Input::Cancel).await;
+        }
+        let settings = self.settings();
+        let keys = if settings.input.keys == KeysChoice::Overlay {
+            Keys::Overlay { reason: None }
+        } else {
+            match self.install_submap(&settings).await {
+                Ok(k) => Keys::Submap(Arc::new(k)),
+                Err(reason) if settings.input.keys == KeysChoice::Submap => {
+                    tracing::error!("key capture through a submap unavailable: {reason}");
+                    Keys::Unavailable(format!("submap install failed: {reason}"))
+                }
+                Err(reason) => {
+                    tracing::warn!("key capture through a submap unavailable: {reason}");
+                    Keys::Overlay {
+                        reason: Some(format!("submap install failed: {reason}")),
+                    }
+                }
+            }
+        };
+        tracing::info!(keys = %keys.describe(), "key source");
+        *self.keys.lock().unwrap_or_else(|e| e.into_inner()) = keys;
+    }
+
+    async fn install_submap(&self, settings: &Settings) -> Result<SubmapKeys, String> {
+        let hypr = self.hypr.clone().ok_or("not running under Hyprland")?;
+        let kb = self
+            .keyboard
+            .lock()
+            .await
+            .clone()
+            .ok_or("keyboard layout unknown")?;
+        let (table, translate) =
+            crate::keys::bind_table(&settings.input.submap, &kb, &settings.theme.hint.alphabet)
+                .ok_or("keymap unavailable")?;
+        let timer_ms = settings.theme.timing.max_showing_ms.saturating_add(2000);
+        SubmapKeys::install(hypr, table, translate, timer_ms)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Route one event from a key source into the session.
+    pub async fn key_event(&self, ev: KeyEvent) {
+        match ev {
+            KeyEvent::Key(k) => {
+                tracing::debug!(keycode = k.keycode, keysym = k.keysym, utf8 = ?k.utf8, "key");
+                if let Some(input) = self.key_input(&k).await {
+                    self.apply(input).await;
+                }
+            }
+            KeyEvent::Escape => {
+                let before = self.state().await;
+                self.apply(Input::Escape).await;
+                // The overlay unmaps itself on Escape; a submap source leaves
+                // that to the daemon.
+                if before != State::Idle
+                    && self.state().await == State::Idle
+                    && !self.keys().overlay()
+                {
+                    self.end_keys().await;
+                    *self.shown.lock().await = None;
+                    *self.first.lock().await = None;
+                    self.hide_overlay().await;
+                }
+            }
+            KeyEvent::Ended(reason) => {
+                if self.state().await != State::Idle {
+                    tracing::info!(%reason, "key capture ended; cancelling the session");
+                }
+                self.apply(Input::Cancel).await;
+            }
+        }
+    }
+
+    /// Feed a socket2 event to the key source and the session guards.
+    pub async fn hypr_event(&self, ev: &Event) {
+        let keys = self.keys();
+        match ev {
+            Event::Custom { .. } | Event::Submap { .. } => {
+                if let Keys::Submap(k) = &keys
+                    && let Some(e) = k.on_event(ev)
+                {
+                    self.key_event(e).await;
+                }
+            }
+            Event::ActiveWindow { address } if !keys.overlay() => {
+                let started = self.session_window.lock().await.clone();
+                if let Some(w) = started
+                    && address.as_ref() != Some(&w)
+                    && self.state().await != State::Idle
+                {
+                    self.key_event(KeyEvent::Ended("active window changed".into()))
+                        .await;
+                }
+            }
+            Event::ConfigReloaded => {
+                tracing::info!("hyprland config reloaded; reinstalling key binds");
+                self.setup_keys().await;
+            }
+            _ => {}
+        }
+    }
+
+    /// The socket2 stream dropped: submap keys can no longer arrive.
+    pub async fn events_lost(&self) {
+        if !self.keys().overlay() && self.state().await != State::Idle {
+            self.key_event(KeyEvent::Ended("event stream lost".into()))
+                .await;
         }
     }
 
@@ -1166,6 +1339,9 @@ impl Daemon {
     }
 
     async fn hints(&self, scope: Scope, action: Option<Action>) -> Response {
+        if let Keys::Unavailable(reason) = self.keys() {
+            return Response::err(format!("input.keys = \"submap\": {reason}"));
+        }
         // Keep woints out of captured frames (design D14): unmap first.
         if self.shown.lock().await.is_some() {
             self.hide_overlay_and_wait().await;
@@ -1181,6 +1357,7 @@ impl Daemon {
         pipeline::set_chip(&mut out.scene, mode, sub, false);
         // A single scroll container is scrolled without picking.
         let direct = action == Action::Scroll && out.elements.len() == 1;
+        out.scene.keyboard = self.keys().overlay();
         let first_scene = out.scene.clone();
         if direct {
             let e = &out.elements[0];
@@ -1239,6 +1416,7 @@ impl Daemon {
         out.timings
             .record("commit", Duration::from_secs_f64(ct.commit_ms / 1000.0));
 
+        *self.session_window.lock().await = self.active_address().await;
         let n_targets = out.targets.len();
         let n_elements = out.elements.len();
         let vision = out.vision.clone();
@@ -1268,6 +1446,7 @@ impl Daemon {
             })
             .await;
         }
+        self.begin_keys().await;
         Response::with(&HintsReply {
             state: self.state().await,
             targets: Some(n_targets),
@@ -1332,6 +1511,7 @@ impl Daemon {
             source: self.scheme().1,
             detector,
             onnx,
+            keys: self.keys().describe(),
         })
     }
 
@@ -1827,6 +2007,128 @@ mod tests {
         assert_eq!(scroll_key(0x68), Some((Axis::Horizontal, -1)));
         assert_eq!(scroll_key(0xff53), Some((Axis::Horizontal, 1)));
         assert_eq!(scroll_key(0x61), None);
+    }
+
+    use crate::keys::tests::Counting;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    async fn showing(d: &Daemon, action: Action) -> Arc<Counting> {
+        let c = Arc::new(Counting::default());
+        d.set_keys(Keys::Test(c.clone()));
+        let id = d.store.lock().await.insert(vec![element(1), element(2)]);
+        d.apply(Input::Shown {
+            snapshot_id: id,
+            labels: vec!["a".into(), "s".into()],
+            action,
+            explicit: true,
+        })
+        .await;
+        assert_eq!(d.state().await, State::Showing);
+        c
+    }
+
+    #[tokio::test]
+    async fn every_path_to_idle_ends_the_keys() {
+        let d = demo();
+        let c = showing(&d, Action::Click).await;
+        d.apply(Input::Cancel).await;
+        assert_eq!(c.ends.load(SeqCst), 1);
+        let c = showing(&d, Action::Click).await;
+        d.key_event(KeyEvent::Escape).await;
+        assert_eq!(d.state().await, State::Idle);
+        assert_eq!(c.ends.load(SeqCst), 1);
+        let c = showing(&d, Action::Click).await;
+        d.apply(Input::Tick {
+            max_showing: Duration::ZERO,
+        })
+        .await;
+        assert_eq!(d.state().await, State::Idle);
+        assert!(c.ends.load(SeqCst) >= 1);
+        let c = showing(&d, Action::Click).await;
+        d.apply(Input::MonitorsChanged).await;
+        assert!(c.ends.load(SeqCst) >= 1);
+        let c = showing(&d, Action::Click).await;
+        d.apply(Input::Quit).await;
+        assert!(c.ends.load(SeqCst) >= 1);
+        let c = showing(&d, Action::Click).await;
+        d.overlay_gone("test").await;
+        assert!(c.ends.load(SeqCst) >= 1);
+        assert_eq!(d.state().await, State::Idle);
+    }
+
+    #[tokio::test]
+    async fn the_action_path_ends_the_keys_first() {
+        let d = demo();
+        let c = showing(&d, Action::Right).await;
+        d.key_event(KeyEvent::Key(KeyPress {
+            keycode: 39,
+            keysym: 0x73,
+            utf8: Some("s".into()),
+            mods: Default::default(),
+        }))
+        .await;
+        assert_eq!(d.state().await, State::Idle);
+        assert!(c.ends.load(SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn key_events_drive_the_session() {
+        let d = demo();
+        let _ = showing(&d, Action::Click).await;
+        d.key_event(KeyEvent::Ended("test".into())).await;
+        assert_eq!(d.state().await, State::Idle);
+        let _ = showing(&d, Action::Click).await;
+        d.key_event(KeyEvent::Escape).await;
+        assert_eq!(d.state().await, State::Idle);
+    }
+
+    #[tokio::test]
+    async fn active_window_change_ends_the_session() {
+        let d = demo();
+        let _ = showing(&d, Action::Click).await;
+        *d.session_window.lock().await = Some("0x1".into());
+        d.hypr_event(&Event::ActiveWindow {
+            address: Some("0x1".into()),
+        })
+        .await;
+        assert_eq!(d.state().await, State::Showing);
+        d.hypr_event(&Event::ActiveWindow {
+            address: Some("0x2".into()),
+        })
+        .await;
+        assert_eq!(d.state().await, State::Idle);
+    }
+
+    #[tokio::test]
+    async fn lost_event_stream_ends_the_session() {
+        let d = demo();
+        let _ = showing(&d, Action::Click).await;
+        d.events_lost().await;
+        assert_eq!(d.state().await, State::Idle);
+    }
+
+    #[tokio::test]
+    async fn config_reload_event_cancels_and_reinstalls() {
+        let d = demo();
+        let _ = showing(&d, Action::Click).await;
+        d.hypr_event(&Event::ConfigReloaded).await;
+        assert_eq!(d.state().await, State::Idle);
+        // Without Hyprland the reinstall falls back to the overlay.
+        let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
+        assert_eq!(
+            s.keys,
+            "overlay (submap install failed: not running under Hyprland)"
+        );
+    }
+
+    #[tokio::test]
+    async fn keys_overlay_choice_is_reported_plainly() {
+        let p = temp_config("keys", "[input]\nkeys = \"overlay\"\n");
+        let d = demo_with(Some(p.clone()));
+        d.setup_keys().await;
+        let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
+        assert_eq!(s.keys, "overlay");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
     #[tokio::test]

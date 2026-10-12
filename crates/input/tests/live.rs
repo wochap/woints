@@ -321,6 +321,7 @@ async fn scroll_moves_scroll_pane_under_overlay() {
             value: Some(before),
         }),
         theme: Default::default(),
+        keyboard: false,
     };
     r._overlay.show(scene).await.expect("overlay shown");
     r.pointer.scroll_enter(pane.rect).await.expect("enter");

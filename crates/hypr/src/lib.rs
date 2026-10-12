@@ -14,6 +14,10 @@ use woints_core::geom::{Global, OutputGeom, OutputId, Point, Rect, Size, pick_ou
 use woints_core::model::{Scope, Surface, Target};
 use woints_core::ports::{SelectError, TargetSelector};
 
+mod submap;
+
+pub use submap::{BindKey, SubmapKeys, SubmapTable, Translate};
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("not running under Hyprland: {0} is not set")]
@@ -27,6 +31,8 @@ pub enum Error {
     },
     #[error("hyprland dispatch failed: {0}")]
     Dispatch(String),
+    #[error("not supported by this Hyprland build: {0}")]
+    Unsupported(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -403,6 +409,16 @@ pub enum Event {
     MonitorRemoved {
         name: String,
     },
+    /// `submap>>NAME` (empty for the default submap)
+    Submap {
+        name: String,
+    },
+    /// `configreloaded>>`
+    ConfigReloaded,
+    /// `custom>>PAYLOAD`, from the `event` dispatcher
+    Custom {
+        payload: String,
+    },
     Other {
         name: String,
         data: String,
@@ -433,6 +449,13 @@ pub fn parse_event(line: &str) -> Option<Event> {
         },
         "monitorremoved" => Event::MonitorRemoved {
             name: data.to_owned(),
+        },
+        "submap" => Event::Submap {
+            name: data.to_owned(),
+        },
+        "configreloaded" => Event::ConfigReloaded,
+        "custom" => Event::Custom {
+            payload: data.to_owned(),
         },
         _ => Event::Other {
             name: name.to_owned(),
@@ -775,6 +798,31 @@ mod tests {
             parse_event("monitorremoved>>HDMI-A-1"),
             Some(Event::MonitorRemoved {
                 name: "HDMI-A-1".into()
+            })
+        );
+        assert_eq!(
+            parse_event("submap>>woints-keys"),
+            Some(Event::Submap {
+                name: "woints-keys".into()
+            })
+        );
+        assert_eq!(
+            parse_event("submap>>"),
+            Some(Event::Submap {
+                name: String::new()
+            })
+        );
+        assert_eq!(parse_event("configreloaded>>"), Some(Event::ConfigReloaded));
+        assert_eq!(
+            parse_event("custom>>woints key 38 0"),
+            Some(Event::Custom {
+                payload: "woints key 38 0".into()
+            })
+        );
+        assert_eq!(
+            parse_event("custom>>which_keys>>1"),
+            Some(Event::Custom {
+                payload: "which_keys>>1".into()
             })
         );
         assert!(matches!(

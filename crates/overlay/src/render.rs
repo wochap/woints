@@ -577,6 +577,7 @@ mod tests {
             pinned: None,
             scroll: None,
             theme,
+            keyboard: false,
         };
         let pm = Renderer::new().render(&scene, &output(1.0));
         pm.data()
@@ -614,6 +615,7 @@ mod tests {
             pinned: None,
             scroll: None,
             theme,
+            keyboard: false,
         }
     }
 
@@ -656,6 +658,7 @@ mod tests {
             pinned: None,
             scroll: None,
             theme,
+            keyboard: false,
         };
         let pm = Renderer::new().render(&scene, &output(scale));
         let count = |c: Color, x0: u32, x1: u32| {
@@ -710,6 +713,7 @@ mod tests {
             pinned: None,
             scroll: None,
             theme: Theme::default(),
+            keyboard: false,
         };
         let pm = Renderer::new().render(&scene, &o);
         assert_eq!((pm.width(), pm.height()), (2880, 1800));
@@ -733,6 +737,7 @@ mod tests {
             pinned: None,
             scroll: None,
             theme,
+            keyboard: false,
         };
         let pm = Renderer::new().render(&scene, &output(2.0));
         let hit = pm
@@ -758,6 +763,7 @@ mod tests {
             pinned: None,
             scroll: None,
             theme: Theme::default(),
+            keyboard: false,
         };
         let pm = Renderer::new().render(&scene, &output(1.0));
         let (x, y, w, h) = bbox(&pm);
@@ -799,6 +805,7 @@ mod tests {
             pinned: None,
             scroll: None,
             theme: theme.clone(),
+            keyboard: false,
         };
         let pm = Renderer::new().render(&scene, &output(1.0));
         assert!(count_rgb(&pm, theme.tokens.chip_bg) > 0);
@@ -844,6 +851,7 @@ mod tests {
             }),
             scroll: None,
             theme,
+            keyboard: false,
         };
         let pm = Renderer::new().render(&scene, &big());
         // Outline: 1 px ring around the source rect.
@@ -893,6 +901,7 @@ mod tests {
                 value,
             }),
             theme: theme.clone(),
+            keyboard: false,
         };
         let pm = Renderer::new().render(&scene(None), &big());
         assert_eq!(bbox(&pm), (101, 101, 398, 298));
@@ -941,6 +950,7 @@ mod tests {
             pinned: None,
             scroll: None,
             theme: theme.clone(),
+            keyboard: false,
         };
         let with = Renderer::new().render(&chip(true), &big());
         let without = Renderer::new().render(&chip(false), &big());

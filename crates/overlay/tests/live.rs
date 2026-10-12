@@ -36,6 +36,7 @@ async fn maps_on_focused_output_for_500ms() {
         pinned: None,
         scroll: None,
         theme: Theme::default(),
+        keyboard: false,
     };
     let (overlay, _events) = woints_overlay::spawn().expect("overlay starts");
     let t = tokio::time::timeout(Duration::from_secs(2), overlay.show(scene)).await;
