@@ -40,3 +40,26 @@ The provider SHALL respect the pipeline budget (default 40 ms) by killing an ove
 #### Scenario: Disabled
 - **WHEN** `providers.quickshell.mode = "off"`
 - **THEN** no `qs` process is spawned during `hints` or `snapshot`
+
+### Requirement: Ignored instances
+`providers.quickshell.ignore_configs` SHALL be a list of globs (`*` matches any run of characters including `/`, `?` matches one character, case-sensitive) matched against the `config_path` each instance reports in `qs list`. For an instance whose `config_path` matches any glob, the provider SHALL NOT run `qs ipc show`, `list` or `invoke` against it. Every layer target owned by its pid SHALL be removed from the session: no quickshell elements, no vision fallback, no badges. The default list SHALL be empty. A config reload SHALL take effect from the next request: a newly ignored instance is dropped, and a no-longer-ignored instance is probed on its next appearance. The option SHALL have no effect when `providers.quickshell.mode = "off"` or when `qs list` fails; those layers keep their current behaviour.
+
+#### Scenario: Lock instance ignored
+- **WHEN** `ignore_configs = ["*/lock.qml"]` and `qs list` reports an instance with `config_path` `/home/u/.config/quickshell/shell/lock.qml`
+- **THEN** no `qs ipc` command is run with that instance's id or pid during discovery, `hints` or `snapshot`
+
+#### Scenario: Ignored layer gets no hints
+- **WHEN** an ignored instance owns a mapped layer and `woints hints --scope layers` runs
+- **THEN** no badge is shown on that layer, vision is not run for it, and layers of other instances are hinted as usual
+
+#### Scenario: Other instance unaffected
+- **WHEN** `ignore_configs = ["*/lock.qml"]` and another instance's `config_path` is `/home/u/.config/quickshell/shell/shell.qml`
+- **THEN** that instance is probed and listed as before
+
+#### Scenario: Reload
+- **WHEN** the daemon has probed the `shell.qml` instance and the config is reloaded with `ignore_configs = ["*/shell.qml"]`
+- **THEN** the next `hints` shows no badges on that instance's layers and runs no `qs ipc` command against it
+
+#### Scenario: Doctor
+- **WHEN** `woints doctor` runs with an ignored instance present
+- **THEN** the quickshell section prints `ok  <id> (pid <pid>, <config_path>): ignored (providers.quickshell.ignore_configs)` without probing it
