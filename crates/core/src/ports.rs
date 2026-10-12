@@ -65,7 +65,15 @@ pub const CHROMIUM_DORMANT: &str = "chromium-dormant";
 /// Reason: a Chromium frame stayed dormant after a wake attempt.
 pub const CHROMIUM_WAKE_TIMEOUT: &str = "chromium-wake-timeout";
 
+/// Reason: the layer belongs to a quickshell instance in `providers.quickshell.ignore_configs`.
+pub const QS_IGNORED: &str = "ignored-config";
+
 impl CollectReport {
+    /// The target was dropped by `providers.quickshell.ignore_configs`.
+    pub fn ignored(&self) -> bool {
+        self.reasons.iter().any(|r| r == QS_IGNORED)
+    }
+
     /// A Chromium wake was attempted and the tree did not appear.
     pub fn wake_failed(&self) -> bool {
         self.reasons.iter().any(|r| r == CHROMIUM_WAKE_TIMEOUT)

@@ -10,6 +10,7 @@ use woints_core::doctor::{
 };
 use woints_core::ports::Budget;
 use woints_overlay::font::{EMBEDDED_FAMILY, ResolvedFont};
+use woints_qs::InstanceReport;
 
 use woints_core::proto::State;
 
@@ -133,26 +134,15 @@ impl Daemon {
                 "provider disabled (providers.quickshell.mode = \"off\")",
             )];
         }
-        match q.doctor().await {
+        match q
+            .doctor(&self.settings().config.providers.quickshell.ignore_configs)
+            .await
+        {
             Err(e) => vec![Check::warn(format!(
                 "qs unavailable ({e}); quickshell layers fall back to vision"
             ))],
             Ok(list) if list.is_empty() => vec![Check::ok("no quickshell instances running")],
-            Ok(list) => list
-                .into_iter()
-                .map(|i| {
-                    let head = format!("{} (pid {}, {})", i.id, i.pid, i.config_path);
-                    match (i.module, i.items) {
-                        (true, Ok(n)) => Check::ok(format!("{head}: Woints module, {n} items")),
-                        (true, Err(e)) => {
-                            Check::warn(format!("{head}: Woints module, list failed: {e}"))
-                        }
-                        (false, _) => Check::warn(format!(
-                            "{head}: Woints module not imported; its layers use vision"
-                        )),
-                    }
-                })
-                .collect(),
+            Ok(list) => list.iter().map(instance_check).collect(),
         }
     }
 
@@ -286,6 +276,22 @@ fn font_check(f: &ResolvedFont) -> Check {
     }
 }
 
+fn instance_check(i: &InstanceReport) -> Check {
+    let head = format!("{} (pid {}, {})", i.id, i.pid, i.config_path);
+    if i.ignored {
+        return Check::ok(format!(
+            "{head}: ignored (providers.quickshell.ignore_configs)"
+        ));
+    }
+    match (i.module, &i.items) {
+        (true, Ok(n)) => Check::ok(format!("{head}: Woints module, {n} items")),
+        (true, Err(e)) => Check::warn(format!("{head}: Woints module, list failed: {e}")),
+        (false, _) => Check::warn(format!(
+            "{head}: Woints module not imported; its layers use vision"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use woints_core::doctor::Level;
@@ -317,6 +323,26 @@ mod tests {
             c.message,
             "keys: unavailable (submap install failed: eval failed)"
         );
+    }
+
+    #[test]
+    fn ignored_instance_line() {
+        let mut i = InstanceReport {
+            id: "lock".into(),
+            pid: 7,
+            config_path: "/x/lock.qml".into(),
+            module: false,
+            ignored: true,
+            items: Ok(0),
+        };
+        let c = instance_check(&i);
+        assert_eq!(c.level, Level::Ok);
+        assert_eq!(
+            c.message,
+            "lock (pid 7, /x/lock.qml): ignored (providers.quickshell.ignore_configs)"
+        );
+        i.ignored = false;
+        assert_eq!(instance_check(&i).level, Level::Warn);
     }
 
     #[test]

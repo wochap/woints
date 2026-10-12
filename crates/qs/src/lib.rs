@@ -12,8 +12,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use woints_core::config::glob;
 use woints_core::model::{Action, Element, Target, Timings};
-use woints_core::ports::{Budget, CollectReport, Collected, ElementProvider, ProviderError};
+use woints_core::ports::{
+    Budget, CollectReport, Collected, ElementProvider, ProviderError, QS_IGNORED,
+};
 use woints_core::proto::ProviderStatus;
 
 pub use parse::{Instance, Item, PROTOCOL, split_handle};
@@ -56,6 +59,20 @@ struct Known {
     id: String,
     config_path: String,
     module: bool,
+    /// `qs ipc show` ran for this instance.
+    probed: bool,
+}
+
+fn is_ignored(ignore: &[String], config_path: &str) -> bool {
+    ignore.iter().any(|g| glob(g, config_path))
+}
+
+/// What `resolve` knows about a layer pid.
+#[derive(Debug, Clone, PartialEq)]
+enum Resolved {
+    /// Instance id with the Woints module.
+    Module(String),
+    Ignored,
 }
 
 #[derive(Default)]
@@ -74,6 +91,8 @@ pub struct InstanceReport {
     pub pid: u32,
     pub config_path: String,
     pub module: bool,
+    /// Matched `providers.quickshell.ignore_configs`; not probed.
+    pub ignored: bool,
     /// Items listed, or the error.
     pub items: Result<usize, String>,
 }
@@ -116,8 +135,8 @@ impl<R: Runner> QuickshellIpcProvider<R> {
         }
     }
 
-    /// Re-run `qs list` and probe new instances. Instances that vanished are
-    /// dropped; pids not listed become foreign.
+    /// Re-run `qs list`. Instances that vanished are dropped; pids not listed
+    /// become foreign. New instances are probed by `probe_pending`.
     async fn discover(&self, cache: &mut Cache, pids: &[u32]) {
         let listed = match self
             .runner
@@ -146,34 +165,13 @@ impl<R: Runner> QuickshellIpcProvider<R> {
             {
                 continue;
             }
-            let pid = inst.pid.to_string();
-            let module = match self
-                .runner
-                .run(args(&["ipc", "--pid", &pid, "show"]), DISCOVERY_TIMEOUT)
-                .await
-            {
-                Ok(show) => parse::has_module(&show),
-                Err(e) => {
-                    tracing::debug!(pid = inst.pid, "qs ipc show: {e}");
-                    false
-                }
-            };
-            if module {
-                tracing::info!(id = %inst.id, pid = inst.pid, "quickshell instance with the Woints module");
-            } else {
-                tracing::info!(
-                    id = %inst.id,
-                    pid = inst.pid,
-                    config = %inst.config_path,
-                    "quickshell instance without the Woints module; its layers fall back to vision"
-                );
-            }
             cache.instances.insert(
                 inst.pid,
                 Known {
                     id: inst.id.clone(),
                     config_path: inst.config_path.clone(),
-                    module,
+                    module: false,
+                    probed: false,
                 },
             );
         }
@@ -185,9 +183,50 @@ impl<R: Runner> QuickshellIpcProvider<R> {
         cache.last_error = None;
     }
 
-    /// Instances (id) with the module for `pids`, discovering when a pid is
-    /// new.
-    async fn resolve(&self, pids: &[u32]) -> HashMap<u32, String> {
+    /// Run `qs ipc show` for every cached instance not yet probed and not
+    /// ignored.
+    async fn probe_pending(&self, cache: &mut Cache, ignore: &[String]) {
+        let pending: Vec<u32> = cache
+            .instances
+            .iter()
+            .filter(|(_, k)| !k.probed && !is_ignored(ignore, &k.config_path))
+            .map(|(p, _)| *p)
+            .collect();
+        for pid in pending {
+            let Some(k) = cache.instances.get_mut(&pid) else {
+                continue;
+            };
+            k.module = match self
+                .runner
+                .run(
+                    args(&["ipc", "--pid", &pid.to_string(), "show"]),
+                    DISCOVERY_TIMEOUT,
+                )
+                .await
+            {
+                Ok(show) => parse::has_module(&show),
+                Err(e) => {
+                    tracing::debug!(pid, "qs ipc show: {e}");
+                    false
+                }
+            };
+            k.probed = true;
+            if k.module {
+                tracing::info!(id = %k.id, pid, "quickshell instance with the Woints module");
+            } else {
+                tracing::info!(
+                    id = %k.id,
+                    pid,
+                    config = %k.config_path,
+                    "quickshell instance without the Woints module; its layers fall back to vision"
+                );
+            }
+        }
+    }
+
+    /// Instances for `pids`: the module id, or ignored. Discovers when a pid
+    /// is new and probes instances that are no longer ignored.
+    async fn resolve(&self, pids: &[u32], ignore: &[String]) -> HashMap<u32, Resolved> {
         let mut cache = self.cache.lock().await;
         let unknown = pids
             .iter()
@@ -195,13 +234,15 @@ impl<R: Runner> QuickshellIpcProvider<R> {
         if unknown {
             self.discover(&mut cache, pids).await;
         }
+        self.probe_pending(&mut cache, ignore).await;
         pids.iter()
             .filter_map(|p| {
-                cache
-                    .instances
-                    .get(p)
-                    .filter(|k| k.module)
-                    .map(|k| (*p, k.id.clone()))
+                let k = cache.instances.get(p)?;
+                if is_ignored(ignore, &k.config_path) {
+                    Some((*p, Resolved::Ignored))
+                } else {
+                    k.module.then(|| (*p, Resolved::Module(k.id.clone())))
+                }
             })
             .collect()
     }
@@ -226,7 +267,12 @@ impl<R: Runner> QuickshellIpcProvider<R> {
     }
 
     /// Elements for every layer target, one `list` per instance; stage `qs.list`.
-    pub async fn collect_layers(&self, targets: &[&Target], budget: Budget) -> LayerCollect {
+    pub async fn collect_layers(
+        &self,
+        targets: &[&Target],
+        budget: Budget,
+        ignore: &[String],
+    ) -> LayerCollect {
         let t = Instant::now();
         let mut pids: Vec<u32> = targets
             .iter()
@@ -243,9 +289,15 @@ impl<R: Runner> QuickshellIpcProvider<R> {
         let ids = if pids.is_empty() {
             HashMap::new()
         } else {
-            self.resolve(&pids).await
+            self.resolve(&pids, ignore).await
         };
-        let mut uniq: Vec<&String> = ids.values().collect();
+        let mut uniq: Vec<&String> = ids
+            .values()
+            .filter_map(|r| match r {
+                Resolved::Module(id) => Some(id),
+                Resolved::Ignored => None,
+            })
+            .collect();
         uniq.sort();
         uniq.dedup();
         let timeout = self.budget.min(remaining);
@@ -278,7 +330,11 @@ impl<R: Runner> QuickshellIpcProvider<R> {
                         report.reasons.push("no-module".into());
                         Vec::new()
                     }
-                    Some(id) => match items.get(id) {
+                    Some(Resolved::Ignored) => {
+                        report.reasons.push(QS_IGNORED.into());
+                        Vec::new()
+                    }
+                    Some(Resolved::Module(id)) => match items.get(id) {
                         Some(Ok(list)) => {
                             report.paired = Some("pid".into());
                             parse::elements_for(target, id, list)
@@ -335,7 +391,7 @@ impl<R: Runner> QuickshellIpcProvider<R> {
     }
 
     /// Fresh discovery and a `list` per instance, for `doctor`.
-    pub async fn doctor(&self) -> Result<Vec<InstanceReport>, String> {
+    pub async fn doctor(&self, ignore: &[String]) -> Result<Vec<InstanceReport>, String> {
         let mut cache = self.cache.lock().await;
         cache.instances.clear();
         cache.foreign.clear();
@@ -343,6 +399,7 @@ impl<R: Runner> QuickshellIpcProvider<R> {
         if let Some(e) = &cache.last_error {
             return Err(e.clone());
         }
+        self.probe_pending(&mut cache, ignore).await;
         let known: Vec<(u32, Known)> = cache
             .instances
             .iter()
@@ -351,7 +408,10 @@ impl<R: Runner> QuickshellIpcProvider<R> {
         drop(cache);
         let mut out = Vec::new();
         for (pid, k) in known {
-            let items = if k.module {
+            let ignored = is_ignored(ignore, &k.config_path);
+            let items = if ignored {
+                Ok(0)
+            } else if k.module {
                 self.list(&k.id, DISCOVERY_TIMEOUT).await.map(|i| i.len())
             } else {
                 Err("Woints module not imported".into())
@@ -361,6 +421,7 @@ impl<R: Runner> QuickshellIpcProvider<R> {
                 pid,
                 config_path: k.config_path,
                 module: k.module,
+                ignored,
                 items,
             });
         }
@@ -375,7 +436,7 @@ impl<R: Runner> ElementProvider for QuickshellIpcProvider<R> {
     }
 
     async fn collect(&self, target: &Target, budget: Budget) -> Result<Collected, ProviderError> {
-        let mut c = self.collect_layers(&[target], budget).await;
+        let mut c = self.collect_layers(&[target], budget, &[]).await;
         let mut one = c.per_target.pop().unwrap_or_default();
         one.timings = c.timings;
         Ok(one)
@@ -426,7 +487,7 @@ mod tests {
             if line == "list --all --json" {
                 let v: Vec<_> = inst
                     .iter()
-                    .map(|(pid, id, _)| serde_json::json!({"id": id, "pid": pid, "config_path": "/x/shell.qml"}))
+                    .map(|(pid, id, _)| serde_json::json!({"id": id, "pid": pid, "config_path": format!("/x/{id}.qml")}))
                     .collect();
                 return Ok(serde_json::to_string(&v).unwrap());
             }
@@ -476,7 +537,7 @@ mod tests {
         let bar = layer("quickshell:bar", 10);
         let keys = layer("quickshell:which-keys", 10);
         let lock = layer("quickshell:lock", 11);
-        let c = p.collect_layers(&[&bar, &keys, &lock], budget()).await;
+        let c = p.collect_layers(&[&bar, &keys, &lock], budget(), &[]).await;
         assert_eq!(c.per_target[0].elements.len(), 2);
         assert_eq!(c.per_target[1].elements.len(), 1);
         assert!(c.per_target[2].elements.is_empty());
@@ -484,7 +545,7 @@ mod tests {
         assert_eq!(fake.calls("ipc --id shell call woints list"), 1);
         assert!(c.timings.get("qs.list").is_some());
         // Cached: no rediscovery on the next request.
-        p.collect_layers(&[&bar], budget()).await;
+        p.collect_layers(&[&bar], budget(), &[]).await;
         assert_eq!(fake.calls("list --all"), 1);
         assert_eq!(fake.calls("ipc --pid"), 2);
         assert!(p.status().await.available);
@@ -494,11 +555,11 @@ mod tests {
     async fn pid_change_rediscovers() {
         let fake = Fake::new(vec![(10, "shell", true)]);
         let p = QuickshellIpcProvider::with_runner(&fake, Duration::from_millis(40));
-        p.collect_layers(&[&layer("quickshell:bar", 10)], budget())
+        p.collect_layers(&[&layer("quickshell:bar", 10)], budget(), &[])
             .await;
         *fake.instances.lock().unwrap() = vec![(20, "shell2", true)];
         let c = p
-            .collect_layers(&[&layer("quickshell:bar", 20)], budget())
+            .collect_layers(&[&layer("quickshell:bar", 20)], budget(), &[])
             .await;
         assert_eq!(fake.calls("list --all"), 2);
         assert_eq!(c.per_target[0].elements.len(), 2);
@@ -514,7 +575,7 @@ mod tests {
         let p = QuickshellIpcProvider::with_runner(&fake, Duration::from_millis(40));
         let mako = layer("notifications", 99);
         for _ in 0..3 {
-            let c = p.collect_layers(&[&mako], budget()).await;
+            let c = p.collect_layers(&[&mako], budget(), &[]).await;
             assert!(c.per_target[0].elements.is_empty());
         }
         assert_eq!(fake.calls("list --all"), 1);
@@ -527,9 +588,9 @@ mod tests {
         *fake.list_reply.lock().unwrap() = Err(RunError::Timeout);
         let p = QuickshellIpcProvider::with_runner(&fake, Duration::from_millis(40));
         let bar = layer("quickshell:bar", 10);
-        let c = p.collect_layers(&[&bar], budget()).await;
+        let c = p.collect_layers(&[&bar], budget(), &[]).await;
         assert!(c.per_target[0].report.truncated);
-        p.collect_layers(&[&bar], budget()).await;
+        p.collect_layers(&[&bar], budget(), &[]).await;
         assert_eq!(fake.calls("list --all"), 2);
     }
 
@@ -556,9 +617,63 @@ mod tests {
     async fn no_layers_no_spawn() {
         let fake = Fake::new(vec![(10, "shell", true)]);
         let p = QuickshellIpcProvider::with_runner(&fake, Duration::from_millis(40));
-        let c = p.collect_layers(&[], budget()).await;
+        let c = p.collect_layers(&[], budget(), &[]).await;
         assert!(c.per_target.is_empty());
         assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    fn ign(g: &[&str]) -> Vec<String> {
+        g.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[tokio::test]
+    async fn ignored_instance_is_never_probed() {
+        let fake = Fake::new(vec![(10, "shell", true), (11, "lock", true)]);
+        let p = QuickshellIpcProvider::with_runner(&fake, Duration::from_millis(40));
+        let ignore = ign(&["*/lock.qml"]);
+        let bar = layer("quickshell:bar", 10);
+        let lock = layer("quickshell:lock", 11);
+        let c = p.collect_layers(&[&bar, &lock], budget(), &ignore).await;
+        assert_eq!(c.per_target[0].elements.len(), 2);
+        assert!(c.per_target[1].elements.is_empty());
+        assert!(c.per_target[1].report.ignored());
+        assert_eq!(fake.calls("ipc --pid 11"), 0);
+        assert_eq!(fake.calls("ipc --id lock"), 0);
+        let r = p.doctor(&ignore).await.unwrap();
+        assert!(r.iter().find(|i| i.id == "lock").unwrap().ignored);
+        let shell = r.iter().find(|i| i.id == "shell").unwrap();
+        assert!(!shell.ignored);
+        assert_eq!(shell.items, Ok(4));
+        assert_eq!(fake.calls("ipc --pid 11"), 0);
+        assert_eq!(fake.calls("ipc --id lock"), 0);
+    }
+
+    #[tokio::test]
+    async fn reload_adds_glob() {
+        let fake = Fake::new(vec![(10, "shell", true)]);
+        let p = QuickshellIpcProvider::with_runner(&fake, Duration::from_millis(40));
+        let bar = layer("quickshell:bar", 10);
+        p.collect_layers(&[&bar], budget(), &[]).await;
+        assert_eq!(fake.calls("ipc --id shell call"), 1);
+        let c = p
+            .collect_layers(&[&bar], budget(), &ign(&["*/shell.qml"]))
+            .await;
+        assert!(c.per_target[0].report.ignored());
+        assert!(c.per_target[0].elements.is_empty());
+        assert_eq!(fake.calls("ipc --id shell call"), 1);
+    }
+
+    #[tokio::test]
+    async fn reload_removes_glob() {
+        let fake = Fake::new(vec![(10, "shell", true)]);
+        let p = QuickshellIpcProvider::with_runner(&fake, Duration::from_millis(40));
+        let bar = layer("quickshell:bar", 10);
+        p.collect_layers(&[&bar], budget(), &ign(&["*/shell.qml"]))
+            .await;
+        assert_eq!(fake.calls("ipc --pid"), 0);
+        let c = p.collect_layers(&[&bar], budget(), &[]).await;
+        assert_eq!(fake.calls("ipc --pid"), 1);
+        assert_eq!(c.per_target[0].elements.len(), 2);
     }
 
     fn live() -> bool {
@@ -572,7 +687,7 @@ mod tests {
             return;
         }
         let p = QuickshellIpcProvider::new(Duration::from_millis(200));
-        match p.doctor().await {
+        match p.doctor(&[]).await {
             Ok(r) => {
                 for i in &r {
                     eprintln!(

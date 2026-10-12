@@ -48,6 +48,7 @@ pub trait LayerSource: Sync {
         &self,
         targets: &[&Target],
         budget: Budget,
+        ignore: &[String],
     ) -> impl Future<Output = LayerCollect> + Send;
 }
 
@@ -55,7 +56,7 @@ pub trait LayerSource: Sync {
 pub struct NoLayers;
 
 impl LayerSource for NoLayers {
-    async fn collect_layers(&self, targets: &[&Target], _: Budget) -> LayerCollect {
+    async fn collect_layers(&self, targets: &[&Target], _: Budget, _: &[String]) -> LayerCollect {
         LayerCollect {
             per_target: targets
                 .iter()
@@ -74,8 +75,13 @@ impl LayerSource for NoLayers {
 }
 
 impl LayerSource for QuickshellIpcProvider {
-    async fn collect_layers(&self, targets: &[&Target], budget: Budget) -> LayerCollect {
-        QuickshellIpcProvider::collect_layers(self, targets, budget).await
+    async fn collect_layers(
+        &self,
+        targets: &[&Target],
+        budget: Budget,
+        ignore: &[String],
+    ) -> LayerCollect {
+        QuickshellIpcProvider::collect_layers(self, targets, budget, ignore).await
     }
 }
 
@@ -609,7 +615,13 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
             let budget = Budget {
                 deadline: Instant::now() + PROVIDER_BUDGET.max(qs_budget),
             };
-            layers.collect_layers(&layer_refs, budget).await
+            layers
+                .collect_layers(
+                    &layer_refs,
+                    budget,
+                    &config.providers.quickshell.ignore_configs,
+                )
+                .await
         }
     };
     let ((top_out, sub), lc) = tokio::join!(tops, lays);
@@ -619,6 +631,7 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
     // mapped); only layers with no provider at all fall back to vision.
     let mut served: Vec<bool> = vec![false; targets.len()];
     let mut wake_failed: Vec<bool> = vec![false; targets.len()];
+    let mut ignored: Vec<bool> = vec![false; targets.len()];
     let mut reports = Vec::new();
     for (&i, (els, rep)) in top_idx.iter().zip(top_out) {
         served[i] = !els.is_empty();
@@ -631,6 +644,7 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
         .collect();
     for (&i, c) in layer_idx.iter().zip(lc.per_target) {
         served[i] = !c.elements.is_empty() || c.report.paired.is_some();
+        ignored[i] = c.report.ignored();
         per_target[i] = c.elements;
         reports.push(c.report);
     }
@@ -646,9 +660,17 @@ pub async fn run<P: ElementProvider + Sync, L: LayerSource, V: VisionStage>(
     let mut vision_timings = Timings::default();
     let mut merge_ms = Duration::ZERO;
     let mut finals: Vec<Vec<Element>> = Vec::with_capacity(targets.len());
-    for (((target, atspi), served), wake_failed) in
-        targets.iter().zip(per_target).zip(served).zip(wake_failed)
+    for ((((target, atspi), served), wake_failed), ignored) in targets
+        .iter()
+        .zip(per_target)
+        .zip(served)
+        .zip(wake_failed)
+        .zip(ignored)
     {
+        if ignored {
+            finals.push(Vec::new());
+            continue;
+        }
         let usable = match action {
             Some(a) => atspi.iter().filter(|e| hintable(e, a)).count(),
             None => atspi.len(),
@@ -1080,7 +1102,12 @@ mod tests {
     struct FakeLayers;
 
     impl LayerSource for FakeLayers {
-        async fn collect_layers(&self, targets: &[&Target], _: Budget) -> LayerCollect {
+        async fn collect_layers(
+            &self,
+            targets: &[&Target],
+            _: Budget,
+            _: &[String],
+        ) -> LayerCollect {
             let mut timings = Timings::default();
             timings.record("qs.list", Duration::from_millis(1));
             LayerCollect {
@@ -1153,6 +1180,63 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    /// Layers that report `reason`, with no elements.
+    struct ReasonLayers(&'static str);
+
+    impl LayerSource for ReasonLayers {
+        async fn collect_layers(
+            &self,
+            targets: &[&Target],
+            _: Budget,
+            _: &[String],
+        ) -> LayerCollect {
+            LayerCollect {
+                per_target: targets
+                    .iter()
+                    .map(|_| Collected {
+                        report: CollectReport {
+                            provider: "quickshell".into(),
+                            reasons: vec![self.0.into()],
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .collect(),
+                timings: Timings::default(),
+            }
+        }
+    }
+
+    async fn layer_vision(source: &impl LayerSource) -> Output {
+        let mut s = snap(None);
+        s.layers = vec![bar()];
+        run(
+            s,
+            Scope::Layers,
+            Some(Action::Click),
+            &Config::default(),
+            &Theme::default(),
+            Timings::default(),
+            &DemoProvider,
+            source,
+            &FakeVision { min: 100 },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ignored_layer_skips_vision() {
+        let o = layer_vision(&ReasonLayers(woints_core::ports::QS_IGNORED)).await;
+        assert!(o.elements.is_empty());
+        assert!(o.scene.badges.is_empty());
+        assert!(!o.vision.ran);
+        assert!(o.reports.iter().all(|r| r.provider != "vision"));
+        let o = layer_vision(&ReasonLayers("no-module")).await;
+        assert!(o.vision.ran);
+        assert!(!o.elements.is_empty());
     }
 
     #[tokio::test]

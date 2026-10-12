@@ -154,7 +154,10 @@ floating window are dropped. Other overlaps between windows are not resolved
 (Hyprland does not expose z-order).
 
 Layer elements come from the quickshell module when the shell imports it,
-else from vision.
+else from vision. To skip a quickshell instance entirely (for example a lock
+screen), list a glob of its config path in `providers.quickshell.ignore_configs`
+(`["*/lock.qml"]`): it is never probed and its layers get no hints, not even
+from vision. `woints doctor` marks ignored instances.
 
 ## CLI
 

@@ -124,6 +124,7 @@ default = "click"
 [providers.quickshell]
 mode      = "auto"  # "auto" | "off"
 budget_ms = 250  # one `qs ipc call` fork takes 50–100 ms; killed on overrun
+ignore_configs = []  # config_path globs of instances to skip, e.g. ["*/lock.qml"]
 
 [apps]
 disabled_classes     = []  # class globs never hinted

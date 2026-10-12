@@ -424,6 +424,9 @@ pub struct QuickshellConfig {
     /// A forked `qs ipc call` takes 50–100 ms on quickshell 0.3.1 (measured
     /// 2026-10-07), so this must stay well above that.
     pub budget_ms: u64,
+    /// Instances whose `config_path` matches one of these globs are never
+    /// probed, and their layers get no hints.
+    pub ignore_configs: Vec<String>,
 }
 
 impl Default for QuickshellConfig {
@@ -431,6 +434,7 @@ impl Default for QuickshellConfig {
         Self {
             mode: ProviderMode::Auto,
             budget_ms: 250,
+            ignore_configs: Vec::new(),
         }
     }
 }
@@ -1082,6 +1086,19 @@ mod tests {
         let (l, src) = load(Path::new("/nonexistent/woints/config.toml")).unwrap();
         assert_eq!(src, Source::Defaults);
         assert_eq!(l.config, Config::default());
+    }
+
+    #[test]
+    fn quickshell_ignore_configs_parse() {
+        assert!(
+            Config::default()
+                .providers
+                .quickshell
+                .ignore_configs
+                .is_empty()
+        );
+        let l = parse("[providers.quickshell]\nignore_configs = [\"*/lock.qml\"]\n").unwrap();
+        assert_eq!(l.config.providers.quickshell.ignore_configs, ["*/lock.qml"]);
     }
 
     #[test]
