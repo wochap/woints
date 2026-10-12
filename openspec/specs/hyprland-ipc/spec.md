@@ -35,8 +35,31 @@ The `hypr` crate SHALL talk to Hyprland through `$XDG_RUNTIME_DIR/hypr/$HYPRLAND
 - **THEN** the call returns `Ok(())` on an `ok` reply and `Err` carrying the reply text otherwise
 
 ### Requirement: Event stream
-`hypr` SHALL expose an async stream of events from `.socket2.sock`, parsing at least `activelayout`, `focusedmon`, `activewindowv2`, `monitoradded`, `monitorremoved`.
+`hypr` SHALL expose an async stream of events from `.socket2.sock`, parsing at least `activelayout`, `focusedmon`, `activewindowv2`, `monitoradded`, `monitorremoved`, `submap` (the new submap name, empty for the default), `configreloaded`, and `custom` (the raw payload after `custom>>`).
 
 #### Scenario: Monitor hot-plug
 - **WHEN** a `monitoradded` event arrives
 - **THEN** the daemon refreshes its monitor list before the next `hints` request
+
+#### Scenario: Custom event
+- **WHEN** the line `custom>>woints key 38 0` arrives
+- **THEN** the stream yields a custom event with payload `woints key 38 0`
+
+#### Scenario: Submap reset event
+- **WHEN** the line `submap>>` arrives
+- **THEN** the stream yields a submap event with an empty name
+
+### Requirement: Runtime submap control
+`hypr` SHALL be able to define a named submap with a list of binds at runtime, enter it, reset to the default submap, and read the current submap name. It SHALL use the syntax of the running build: Lua `eval` on Lua-enabled builds, `keyword` / `dispatch` batches otherwise. `hypr` SHALL NOT remove or unbind binds at runtime: on Hyprland 0.56.2, `Keybind:remove()` through `eval` crashes the compositor. Defining a submap that already has binds SHALL be a no-op, so reinstalling does not duplicate binds. On Lua builds, `hypr` SHALL also be able to arm a one-shot compositor-side timer that resets a named submap if a given token is still current when the timer fires.
+
+#### Scenario: Reinstall is idempotent
+- **WHEN** the same submap is defined twice
+- **THEN** `j/binds` lists each bind of that submap once
+
+#### Scenario: Current submap
+- **WHEN** Hyprland is in the default submap
+- **THEN** reading the current submap returns an empty or `default` name, and both are treated as default
+
+#### Scenario: Unsupported build
+- **WHEN** defining the submap is rejected by Hyprland
+- **THEN** the call returns an error carrying Hyprland's reply

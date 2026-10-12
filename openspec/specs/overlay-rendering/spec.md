@@ -51,26 +51,32 @@ Badges SHALL be drawn with `tiny-skia` as a filled rounded rect, a 1 px (device-
 - **THEN** that glyph is drawn in `fg_dim` and the remaining glyphs in `fg`
 
 ### Requirement: Keyboard handling
-While showing, the overlay SHALL receive all keyboard input, map keycodes through the compositor-provided xkb keymap, forward key presses (keycode, keysym, utf8, modifiers) to the daemon, and unmap on Escape. When keyboard focus leaves the overlay while it is showing and does not move to another woints overlay surface, the overlay SHALL unmap and the daemon SHALL return to idle in every showing mode (hints, drag phase 1 and 2, scroll). Focus leaving a surface that woints itself removed SHALL NOT end the session.
+The overlay's layer surfaces SHALL take keyboard focus only when the session's key source is `overlay` (see key-input). Under any other key source, they SHALL map with no keyboard interactivity and SHALL NOT react to keyboard focus changes.
+
+With the `overlay` key source, while showing, the overlay SHALL receive all keyboard input, map keycodes through the compositor-provided xkb keymap, forward key presses (keycode, keysym, utf8, modifiers) to the daemon, and unmap on Escape. When keyboard focus leaves the overlay while it is showing and does not move to another woints overlay surface, the overlay SHALL unmap and the daemon SHALL return to idle in every showing mode (hints, drag phase 1 and 2, scroll). Focus leaving a surface that woints itself removed SHALL NOT end the session.
+
+#### Scenario: No focus under the submap source
+- **WHEN** hints are shown with the submap key source
+- **THEN** the overlay surfaces have keyboard interactivity `none` and the focused application keeps keyboard focus
 
 #### Scenario: Escape
-- **WHEN** Escape is pressed while showing
+- **WHEN** Escape is pressed while showing with the `overlay` key source
 - **THEN** the overlay unmaps within one frame and the daemon state returns to idle
 
 #### Scenario: Letter forwarded
-- **WHEN** the key at keycode 38 is pressed under a Colemak-DH keymap
+- **WHEN** the key at keycode 38 is pressed under a Colemak-DH keymap with the `overlay` key source
 - **THEN** the daemon receives keycode 38 with utf8 `a` and keysym `a` (same physical key, layout glyph)
 
 #### Scenario: Another exclusive layer takes focus
-- **WHEN** hints are showing and a launcher layer with exclusive keyboard interactivity opens
+- **WHEN** hints are showing with the `overlay` key source and a launcher layer with exclusive keyboard interactivity opens
 - **THEN** the overlay unmaps and the daemon state returns to idle, so after the launcher closes no badges remain and keys reach the focused window
 
 #### Scenario: Focus loss in drag phase 2
-- **WHEN** the session is picking a drag destination and the overlay loses keyboard focus
+- **WHEN** the session is picking a drag destination with the `overlay` key source and the overlay loses keyboard focus
 - **THEN** the session returns to idle, not to drag phase 1
 
 #### Scenario: Focus moves between woints surfaces
-- **WHEN** badges span two outputs and keyboard focus moves from the woints surface on one output to the woints surface on the other
+- **WHEN** badges span two outputs with the `overlay` key source and keyboard focus moves from the woints surface on one output to the woints surface on the other
 - **THEN** the session keeps showing
 
 #### Scenario: Surface removed by re-show
