@@ -252,7 +252,7 @@ pub enum KeysChoice {
     Overlay,
 }
 
-/// Name of the Hyprland submap woints defines (`input.submap`).
+/// Name of the module's Hyprland submap (`input.submap`).
 pub const DEFAULT_SUBMAP: &str = "woints-keys";
 
 /// `[input]` and `actions.default`, with their defaults.

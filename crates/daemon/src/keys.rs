@@ -1,13 +1,13 @@
 //! Label glyphs of the active keyboard layout (`keys.mode = "auto"`).
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use xkbcommon::xkb;
 
 use woints_core::config::HOME_ROW_KEYCODES;
-use woints_core::ports::{KeyPress, KeySource, OverlayKeys};
-use woints_hypr::{BindKey, Keyboard, SubmapKeys, SubmapTable, Translate};
+use woints_core::ports::{KeyPress, KeySource, Modifiers, OverlayKeys};
+pub use woints_hypr::MODULE_MISSING;
+use woints_hypr::{Keyboard, SubmapKeys};
 
 /// The keyboard whose layout labels follow: Hyprland's main keyboard, else
 /// the first with a layout.
@@ -31,90 +31,83 @@ fn keymap_for(kb: &Keyboard) -> Option<xkb::Keymap> {
     )
 }
 
-/// Non-glyph keys a session reads: name and xkb keycode (evdev + 8).
-const FIXED_KEYS: [(&str, u32); 6] = [
-    ("BackSpace", 22),
-    ("Tab", 23),
-    ("Up", 111),
-    ("Left", 113),
-    ("Right", 114),
-    ("Down", 116),
-];
+/// Whether `sym` is a modifier or lock key (Shift_L..Hyper_R, ISO level
+/// shifts and locks, Mode_switch, Num_Lock).
+fn is_modifier_sym(sym: u32) -> bool {
+    matches!(sym, 0xffe1..=0xffee | 0xfe01..=0xfe13 | 0xff7e | 0xff7f)
+}
 
-/// Scroll mode letters, bound whatever the label alphabet is.
-const SCROLL_GLYPHS: &str = "hjkl";
+/// Turns the key reports of one submap session into [`KeyPress`]es. An xkb
+/// state of the main keyboard's active layout lives on its own thread (it
+/// isn't `Send`), so modifiers, remapped modifiers and shift levels follow
+/// the keymap. The thread ends when the translator is dropped.
+pub struct Translator {
+    tx: mpsc::Sender<(u32, bool)>,
+    rx: mpsc::Receiver<Option<KeyPress>>,
+}
 
-/// Keysym and text of a key at one shift level.
-type Glyph = (u32, Option<String>);
-
-/// The submap's bind table for `kb`'s active layout: a key for each glyph of
-/// `alphabet` and each scroll letter, plus the fixed keys. Also the
-/// translation from a reported keycode and modifiers back to a [`KeyPress`].
-pub fn bind_table(prefix: &str, kb: &Keyboard, alphabet: &str) -> Option<(SubmapTable, Translate)> {
-    let keymap = keymap_for(kb)?;
-    let layout = kb.active_layout_index;
-    let sym_at = |kc: u32, level: u32| {
-        keymap
-            .key_get_syms_by_level(xkb::Keycode::new(kc), layout, level)
-            .first()
-            .copied()
-    };
-    let press = |sym: xkb::Keysym| {
-        let utf8 = xkb::keysym_to_utf8(sym);
-        let utf8 = utf8.trim_end_matches('\0').to_owned();
-        let utf8 = (!utf8.is_empty() && !utf8.chars().any(char::is_control)).then_some(utf8);
-        (sym.raw(), utf8)
-    };
-    let mut wanted: Vec<char> = Vec::new();
-    for c in alphabet.chars().chain(SCROLL_GLYPHS.chars()) {
-        let c = c.to_lowercase().next().unwrap_or(c);
-        if !wanted.contains(&c) {
-            wanted.push(c);
-        }
-    }
-    let mut keys: Vec<BindKey> = Vec::new();
-    let mut found: Vec<char> = Vec::new();
-    for kc in 8..=255 {
-        let Some(sym) = sym_at(kc, 0) else { continue };
-        let Some(c) = char::from_u32(xkb::keysym_to_utf32(sym)) else {
-            continue;
-        };
-        if wanted.contains(&c) && !found.contains(&c) {
-            found.push(c);
-            keys.push(BindKey {
-                keysym: xkb::keysym_get_name(sym),
-                keycode: kc,
-            });
-        }
-    }
-    for (name, kc) in FIXED_KEYS {
-        keys.push(BindKey {
-            keysym: name.into(),
-            keycode: kc,
+impl Translator {
+    pub fn new(kb: &Keyboard) -> Option<Self> {
+        let kb = kb.clone();
+        let (tx, requests) = mpsc::channel::<(u32, bool)>();
+        let (replies, rx) = mpsc::channel();
+        let (ready_tx, ready) = mpsc::channel();
+        std::thread::spawn(move || {
+            let Some(keymap) = keymap_for(&kb) else {
+                let _ = ready_tx.send(false);
+                return;
+            };
+            let mut state = xkb::State::new(&keymap);
+            state.update_mask(0, 0, 0, 0, 0, kb.active_layout_index);
+            let _ = ready_tx.send(true);
+            for (keycode, pressed) in requests {
+                if replies
+                    .send(translate(&mut state, keycode, pressed))
+                    .is_err()
+                {
+                    return;
+                }
+            }
         });
+        ready.recv().unwrap_or(false).then_some(Self { tx, rx })
     }
-    let presses: HashMap<u32, [Option<Glyph>; 2]> = keys
-        .iter()
-        .map(|k| {
-            let at = |level| sym_at(k.keycode, level).map(press);
-            (k.keycode, [at(0), at(1)])
-        })
-        .collect();
-    let translate: Translate = Arc::new(move |keycode, mods| {
-        let [base, shifted] = presses.get(&keycode)?;
-        let (keysym, utf8) = if mods.shift {
-            shifted.as_ref().or(base.as_ref())?
-        } else {
-            base.as_ref()?
-        };
-        Some(KeyPress {
-            keycode,
-            keysym: *keysym,
-            utf8: utf8.clone(),
-            mods,
-        })
-    });
-    Some((SubmapTable::new(prefix, &keys), translate))
+
+    /// Feed one key report. `Some` for the press of a non-modifier key.
+    pub fn feed(&mut self, keycode: u32, pressed: bool) -> Option<KeyPress> {
+        self.tx.send((keycode, pressed)).ok()?;
+        self.rx.recv().ok().flatten()
+    }
+}
+
+fn translate(state: &mut xkb::State, keycode: u32, pressed: bool) -> Option<KeyPress> {
+    let key = xkb::Keycode::new(keycode);
+    let dir = if pressed {
+        xkb::KeyDirection::Down
+    } else {
+        xkb::KeyDirection::Up
+    };
+    state.update_key(key, dir);
+    if !pressed {
+        return None;
+    }
+    let sym = state.key_get_one_sym(key);
+    if is_modifier_sym(sym.raw()) {
+        return None;
+    }
+    let utf8 = state.key_get_utf8(key);
+    let utf8 = (!utf8.is_empty() && !utf8.chars().any(char::is_control)).then_some(utf8);
+    let active = |name| state.mod_name_is_active(name, xkb::STATE_MODS_EFFECTIVE);
+    Some(KeyPress {
+        keycode,
+        keysym: sym.raw(),
+        utf8,
+        mods: Modifiers {
+            shift: active(xkb::MOD_NAME_SHIFT),
+            ctrl: active(xkb::MOD_NAME_CTRL),
+            alt: active(xkb::MOD_NAME_ALT),
+            logo: active(xkb::MOD_NAME_LOGO),
+        },
+    })
 }
 
 /// Where session keys come from, chosen at start-up and on reload.
@@ -234,29 +227,51 @@ pub(crate) mod tests {
         assert_eq!(glyphs(&kb("ru,us", ",colemak_dh", 1)), "arstneiogm");
     }
 
+    /// A translator on a `us` keymap, `None` without xkeyboard-config data.
+    fn translator(options: &str) -> Option<Translator> {
+        let mut k = kb("us", "", 0);
+        k.options = options.into();
+        Translator::new(&k)
+    }
+
     #[test]
-    fn bind_table_follows_the_alphabet_and_layout() {
-        let us = kb("us", "", 0);
-        if layout_glyphs(&us).is_none() {
+    fn shift_then_d_is_a_shifted_d() {
+        let Some(mut t) = translator("") else { return };
+        assert!(t.feed(50, true).is_none());
+        let p = t.feed(40, true).unwrap();
+        assert_eq!((p.keysym, p.utf8.as_deref()), (0x44, Some("D")));
+        assert!(p.mods.shift && !p.mods.ctrl);
+        assert!(t.feed(40, false).is_none());
+        assert!(t.feed(50, false).is_none());
+        let p = t.feed(40, true).unwrap();
+        assert_eq!((p.keysym, p.utf8.as_deref()), (0x64, Some("d")));
+        assert_eq!(p.mods, Modifiers::default());
+    }
+
+    #[test]
+    fn remapped_modifier_is_respected() {
+        let Some(mut t) = translator("caps:ctrl_modifier") else {
             return;
-        }
-        let (a, translate) = bind_table("woints-keys", &us, "asdf").unwrap();
-        let (same, _) = bind_table("woints-keys", &us, "asdf").unwrap();
-        let (other, _) = bind_table("woints-keys", &us, "qwer").unwrap();
-        let (colemak, _) = bind_table("woints-keys", &kb("us", "colemak_dh", 0), "asdf").unwrap();
-        assert_eq!(a, same);
-        assert_ne!(a.name(), other.name());
-        assert_ne!(a.name(), colemak.name());
-        let mods = woints_core::ports::Modifiers::default();
-        let p = translate(38, mods).unwrap();
-        assert_eq!((p.keysym, p.utf8.as_deref()), (0x61, Some("a")));
-        let shifted = woints_core::ports::Modifiers {
-            shift: true,
-            ..mods
         };
-        assert_eq!(translate(38, shifted).unwrap().utf8.as_deref(), Some("A"));
-        assert_eq!(translate(22, mods).unwrap().keysym, 0xff08);
-        assert_eq!(translate(23, mods).unwrap().utf8, None);
-        assert!(translate(24, mods).is_none());
+        assert!(t.feed(66, true).is_none());
+        let p = t.feed(40, true).unwrap();
+        assert!(p.mods.ctrl && !p.mods.shift);
+        assert_eq!(p.keysym, 0x64);
+    }
+
+    #[test]
+    fn modifier_alone_emits_nothing() {
+        let Some(mut t) = translator("") else { return };
+        for kc in [50, 37, 64, 133] {
+            assert!(t.feed(kc, true).is_none());
+            assert!(t.feed(kc, false).is_none());
+        }
+    }
+
+    #[test]
+    fn fixed_keys_translate() {
+        let Some(mut t) = translator("") else { return };
+        assert_eq!(t.feed(22, true).unwrap().keysym, 0xff08);
+        assert_eq!(t.feed(23, true).unwrap().utf8, None);
     }
 }

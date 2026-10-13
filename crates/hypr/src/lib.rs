@@ -16,7 +16,7 @@ use woints_core::ports::{SelectError, TargetSelector};
 
 mod submap;
 
-pub use submap::{BindKey, SubmapKeys, SubmapTable, Translate};
+pub use submap::{MODULE_MISSING, SubmapInput, SubmapKeys};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

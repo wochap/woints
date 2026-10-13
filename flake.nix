@@ -88,6 +88,12 @@
           cp -v ${./integrations/quickshell}/*.qml ${./integrations/quickshell}/qmldir ${./integrations/quickshell}/README.md $out/share/quickshell/Woints/
           test -s $out/share/quickshell/Woints/SHints.qml
         '';
+        hyprland-module = pkgs.runCommand "woints-hyprland-module" { } ''
+          mkdir -p $out/share/hypr
+          cp -v ${./integrations/hyprland/woints.lua} $out/share/hypr/woints.lua
+          cp -v ${./integrations/hyprland/README.md} $out/share/hypr/README.md
+          test -s $out/share/hypr/woints.lua
+        '';
       });
 
       devShells = forAll (pkgs: {

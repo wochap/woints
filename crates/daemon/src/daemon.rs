@@ -22,14 +22,16 @@ use woints_core::proto::{
     ProviderStatus, ReloadReply, Request, Response, SnapshotReply, State, StateReply, StatusReply,
 };
 use woints_core::theme::{Eliminated, Scheme, SchemeSource, Theme};
-use woints_hypr::{Event, Hypr, HyprSnapshot, Keyboard, Monitor, SubmapKeys};
+use woints_hypr::{
+    Error as HyprError, Event, Hypr, HyprSnapshot, Keyboard, Monitor, SubmapInput, SubmapKeys,
+};
 use woints_input::{AbsoluteBackend, Backend, MovecursorBackend, PointerActuator};
 use woints_overlay::font::{self, ResolvedFont, fontdb::Database};
 use woints_overlay::render::{OutputSurface, Renderer};
 use woints_overlay::{OverlayHandle, PointerLink};
 use woints_qs::QuickshellIpcProvider;
 
-use crate::keys::Keys;
+use crate::keys::{Keys, Translator};
 use crate::pipeline::{self, DemoProvider, NoLayers};
 use crate::session::{Effect, Input, Session};
 use crate::store::SnapshotStore;
@@ -242,6 +244,8 @@ pub struct Daemon {
     keyboard: Mutex<Option<Keyboard>>,
     keys: std::sync::Mutex<Keys>,
     key_token: AtomicU64,
+    /// xkb state of the current submap session.
+    translator: std::sync::Mutex<Option<Translator>>,
     /// Active window when the session started (submap keys only).
     session_window: Mutex<Option<String>>,
     pub shutdown: Notify,
@@ -335,6 +339,7 @@ impl Daemon {
             keyboard: Mutex::new(None),
             keys: std::sync::Mutex::new(Keys::Overlay { reason: None }),
             key_token: AtomicU64::new(0),
+            translator: std::sync::Mutex::new(None),
             session_window: Mutex::new(None),
             shutdown: Notify::new(),
         });
@@ -800,6 +805,11 @@ impl Daemon {
 
     /// Start capturing keys for the state just shown (re-arms the timer).
     async fn begin_keys(&self) {
+        if matches!(self.keys(), Keys::Submap(_)) {
+            let kb = self.keyboard.lock().await.clone();
+            *self.translator.lock().unwrap_or_else(|e| e.into_inner()) =
+                kb.as_ref().and_then(Translator::new);
+        }
         let token = self.key_token.fetch_add(1, Ordering::Relaxed) + 1;
         self.keys().begin(token).await;
     }
@@ -831,12 +841,12 @@ impl Daemon {
                 Ok(k) => Keys::Submap(Arc::new(k)),
                 Err(reason) if settings.input.keys == KeysChoice::Submap => {
                     tracing::error!("key capture through a submap unavailable: {reason}");
-                    Keys::Unavailable(format!("submap install failed: {reason}"))
+                    Keys::Unavailable(reason)
                 }
                 Err(reason) => {
                     tracing::warn!("key capture through a submap unavailable: {reason}");
                     Keys::Overlay {
-                        reason: Some(format!("submap install failed: {reason}")),
+                        reason: Some(reason),
                     }
                 }
             }
@@ -847,19 +857,29 @@ impl Daemon {
 
     async fn install_submap(&self, settings: &Settings) -> Result<SubmapKeys, String> {
         let hypr = self.hypr.clone().ok_or("not running under Hyprland")?;
-        let kb = self
-            .keyboard
+        SubmapKeys::install(hypr, &settings.input.submap)
+            .await
+            .map_err(|e| match e {
+                HyprError::Unsupported(reason) => reason.to_owned(),
+                e => e.to_string(),
+            })
+    }
+
+    /// One raw key report from the submap: translate it with the session's
+    /// xkb state. A press that maps to no session input ends the session.
+    async fn submap_key(&self, keycode: u32, pressed: bool) {
+        let press = self
+            .translator
             .lock()
-            .await
-            .clone()
-            .ok_or("keyboard layout unknown")?;
-        let (table, translate) =
-            crate::keys::bind_table(&settings.input.submap, &kb, &settings.theme.hint.alphabet)
-                .ok_or("keymap unavailable")?;
-        let timer_ms = settings.theme.timing.max_showing_ms.saturating_add(2000);
-        SubmapKeys::install(hypr, table, translate, timer_ms)
-            .await
-            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .and_then(|t| t.feed(keycode, pressed));
+        let Some(k) = press else { return };
+        tracing::debug!(keycode = k.keycode, keysym = k.keysym, utf8 = ?k.utf8, "key");
+        match self.key_input(&k).await {
+            Some(input) => self.apply(input).await,
+            None => self.key_event(KeyEvent::Ended("unbound key".into())).await,
+        }
     }
 
     /// Route one event from a key source into the session.
@@ -900,10 +920,14 @@ impl Daemon {
         let keys = self.keys();
         match ev {
             Event::Custom { .. } | Event::Submap { .. } => {
-                if let Keys::Submap(k) = &keys
-                    && let Some(e) = k.on_event(ev)
-                {
-                    self.key_event(e).await;
+                if let Keys::Submap(k) = &keys {
+                    match k.on_event(ev) {
+                        Some(SubmapInput::Key { keycode, pressed }) => {
+                            self.submap_key(keycode, pressed).await;
+                        }
+                        Some(SubmapInput::Session(e)) => self.key_event(e).await,
+                        None => {}
+                    }
                 }
             }
             Event::ActiveWindow { address } if !keys.overlay() => {
@@ -917,7 +941,7 @@ impl Daemon {
                 }
             }
             Event::ConfigReloaded => {
-                tracing::info!("hyprland config reloaded; reinstalling key binds");
+                tracing::info!("hyprland config reloaded; checking the key source");
                 self.setup_keys().await;
             }
             _ => {}
@@ -2115,10 +2139,47 @@ mod tests {
         assert_eq!(d.state().await, State::Idle);
         // Without Hyprland the reinstall falls back to the overlay.
         let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
-        assert_eq!(
-            s.keys,
-            "overlay (submap install failed: not running under Hyprland)"
-        );
+        assert_eq!(s.keys, "overlay (not running under Hyprland)");
+    }
+
+    #[tokio::test]
+    async fn unbound_key_ends_the_session() {
+        let d = demo();
+        let c = showing(&d, Action::Click).await;
+        let kb = Keyboard {
+            layout: "us".into(),
+            main: true,
+            ..Default::default()
+        };
+        let Some(t) = Translator::new(&kb) else {
+            return;
+        };
+        *d.translator.lock().unwrap() = Some(t);
+        // Shift alone keeps the session.
+        d.submap_key(50, true).await;
+        d.submap_key(50, false).await;
+        assert_eq!(d.state().await, State::Showing);
+        // F5 maps to no session input.
+        d.submap_key(71, true).await;
+        assert_eq!(d.state().await, State::Idle);
+        assert_eq!(c.ends.load(SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn submap_choice_without_the_module_is_unavailable() {
+        let p = temp_config("submap", "[input]\nkeys = \"submap\"\n");
+        let d = demo_with(Some(p.clone()));
+        d.setup_keys().await;
+        let s: StatusReply = d.handle(Request::Status).await.payload().unwrap();
+        assert_eq!(s.keys, "unavailable (not running under Hyprland)");
+        let r = d
+            .handle(Request::Hints {
+                scope: None,
+                action: None,
+            })
+            .await;
+        assert!(!r.ok);
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
     #[tokio::test]

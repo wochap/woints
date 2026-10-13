@@ -15,7 +15,7 @@ use woints_qs::InstanceReport;
 use woints_core::proto::State;
 
 use crate::daemon::{Daemon, Provider};
-use crate::keys::Keys;
+use crate::keys::{Keys, MODULE_MISSING};
 
 /// Hyprland version woints was verified against.
 const VERIFIED_HYPRLAND: &str = "0.56.2";
@@ -247,12 +247,16 @@ impl Daemon {
 }
 
 /// Hyprland-group line for the key source, and a stuck-submap warning when
-/// Hyprland sits in a woints submap with no session.
+/// Hyprland sits in the woints submap with no session.
 fn keys_check(keys: &Keys, current: Option<&str>, prefix: &str, idle: bool) -> Check {
-    let stuck = current.filter(|c| idle && c.starts_with(&format!("{prefix}-")));
+    let stuck = current.filter(|c| idle && *c == prefix);
     match (stuck, keys) {
         (Some(c), _) => Check::warn(format!(
             "keys: Hyprland is in submap {c} with no session; run `hyprctl dispatch submap reset`"
+        )),
+        (None, Keys::Overlay { reason: Some(r) }) if r == MODULE_MISSING => Check::warn(format!(
+            "keys: {}; add require(\"woints\").setup() to hyprland.lua",
+            keys.describe()
         )),
         (None, Keys::Overlay { reason: Some(_) }) => {
             Check::warn(format!("keys: {}", keys.describe()))
@@ -304,24 +308,34 @@ mod tests {
         let c = keys_check(&overlay, None, "woints-keys", true);
         assert_eq!((c.level, c.message.as_str()), (Level::Ok, "keys: overlay"));
         let fell = Keys::Overlay {
-            reason: Some("eval failed".into()),
+            reason: Some("not a Lua build".into()),
         };
         let c = keys_check(&fell, None, "woints-keys", true);
         assert_eq!(c.level, Level::Warn);
-        assert_eq!(c.message, "keys: overlay (eval failed)");
-        let c = keys_check(&overlay, Some("woints-keys-3fa9c1d2"), "woints-keys", true);
+        assert_eq!(c.message, "keys: overlay (not a Lua build)");
+        let c = keys_check(&overlay, Some("woints-keys"), "woints-keys", true);
         assert_eq!(c.level, Level::Warn);
         assert!(c.message.contains("hyprctl dispatch submap reset"));
-        let c = keys_check(&overlay, Some("woints-keys-3fa9c1d2"), "woints-keys", false);
+        let c = keys_check(&overlay, Some("woints-keys"), "woints-keys", false);
         assert_eq!(c.level, Level::Ok);
         let c = keys_check(&overlay, Some("woints"), "woints-keys", true);
         assert_eq!(c.level, Level::Ok);
-        let off = Keys::Unavailable("submap install failed: eval failed".into());
+        let off = Keys::Unavailable(MODULE_MISSING.into());
         let c = keys_check(&off, None, "woints-keys", true);
         assert_eq!(c.level, Level::Fail);
+        assert_eq!(c.message, "keys: unavailable (Hyprland module not loaded)");
+    }
+
+    #[test]
+    fn module_lines() {
+        let missing = Keys::Overlay {
+            reason: Some(MODULE_MISSING.into()),
+        };
+        let c = keys_check(&missing, None, "woints-keys", true);
+        assert_eq!(c.level, Level::Warn);
         assert_eq!(
             c.message,
-            "keys: unavailable (submap install failed: eval failed)"
+            "keys: overlay (Hyprland module not loaded); add require(\"woints\").setup() to hyprland.lua"
         );
     }
 

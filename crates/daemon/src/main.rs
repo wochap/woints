@@ -38,11 +38,8 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("usage: wointsd [--config PATH] [--print-submap]");
+        println!("usage: wointsd [--config PATH]");
         return std::process::ExitCode::SUCCESS;
-    }
-    if args.iter().any(|a| a == "--print-submap") {
-        return print_submap(&args).await;
     }
     let config_path = match args.iter().position(|a| a == "--config") {
         Some(i) => match args.get(i + 1) {
@@ -177,38 +174,4 @@ async fn watchdog(daemon: Arc<Daemon>) {
             Duration::from_millis(u64::from(daemon.settings().theme.timing.max_showing_ms));
         daemon.apply(Input::Tick { max_showing }).await;
     }
-}
-
-/// `--print-submap`: print the bind scripts for the current layout without
-/// sending anything to Hyprland's `eval`.
-async fn print_submap(args: &[String]) -> std::process::ExitCode {
-    let fail = |m: String| {
-        eprintln!("wointsd: {m}");
-        std::process::ExitCode::from(1)
-    };
-    let path = match args.iter().position(|a| a == "--config") {
-        Some(i) => args.get(i + 1).map(std::path::PathBuf::from),
-        None => woints_core::config::default_path(),
-    };
-    let (config, _) = daemon::initial_config(path.as_deref());
-    let hypr = match Hypr::from_env() {
-        Ok(h) => h,
-        Err(e) => return fail(e.to_string()),
-    };
-    let kbs = match hypr.keyboards().await {
-        Ok(k) => k,
-        Err(e) => return fail(e.to_string()),
-    };
-    let Some(kb) = keys::main_keyboard(&kbs) else {
-        return fail("no keyboard".into());
-    };
-    let layout = keys::layout_glyphs(kb);
-    let alphabet = config.alphabet(layout.as_deref());
-    let input = config.input_config();
-    let Some((table, _)) = keys::bind_table(&input.submap, kb, &alphabet) else {
-        return fail("keymap unavailable".into());
-    };
-    println!("# Lua (hyprctl eval)\n{}\n", table.lua_script());
-    println!("# legacy\n{}", table.legacy_batch());
-    std::process::ExitCode::SUCCESS
 }

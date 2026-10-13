@@ -223,29 +223,42 @@ lists all defaults. Sections: `[hint]`, `[timing]`, `[chip]`, `[theme.dark]`,
 
 By default (`input.keys = "auto"`) hint keys come from a Hyprland submap, not
 from a focused overlay surface, so the focused window keeps keyboard focus and
-popups (a `<select>` list, a GTK menu) stay open while hints show. At start-up
-and on layout or config changes `wointsd` defines a submap named
-`<input.submap>-<hash>` (default `woints-keys-…`) with a bind for each label
-key, `h j k l`, the arrows, Backspace and Tab, each also with Shift, Ctrl, Alt
-and Super. The binds send their key over Hyprland's `event` dispatcher and the
-daemon reads them from the event socket. A session enters the submap when hints
-show and leaves it when they go. woints never removes binds: a changed table
-gets a new submap name, and Hyprland drops the old ones on its next reload.
+popups (a `<select>` list, a GTK menu) stay open while hints show. The submap
+is defined by a Lua module shipped with woints
+(`integrations/hyprland/woints.lua`, or the flake's `hyprland-module` output).
+Load it from `hyprland.lua`:
 
-`input.keys = "overlay"` restores the old behaviour (the overlay takes
-exclusive keyboard focus). `"auto"` falls back to it when the submap can't be
-installed, and `woints status` / `woints doctor` show the reason.
+```lua
+require("woints").setup()
+```
+
+The module's submap (default `woints-keys`, `setup({ submap = ... })`; it must
+match `input.submap`) binds only a no-op catchall, so every key is swallowed
+while it is active. A key listener reports each press and release to the
+daemon, which turns them into keysyms and modifiers with an xkb state of your
+keyboard layout. A key that is not a label glyph, Backspace, Tab, a scroll key,
+Escape or a modifier ends the session. A session enters the submap when hints
+show and leaves it when they go. The daemon never defines binds or submaps.
+
+**Breaking change:** the daemon no longer defines the submap itself, and
+`wointsd --print-submap` is gone. Add the `require` line above. Until you do,
+`"auto"` uses the overlay source (`woints doctor` prints the line to add), and
+legacy (non-Lua) Hyprland builds always do.
+
+`input.keys = "overlay"` makes the overlay take exclusive keyboard focus
+instead, which closes popups. `"submap"` fails `hints` when the module isn't
+loaded. `woints status` / `woints doctor` show the key source and the reason.
 
 Stuck-state guarantees, each independent of the others:
 
-- Escape and any key outside the table (a catchall bind) reset the submap in
-  Hyprland itself, without the daemon.
-- On Lua-config builds a Hyprland-side timer resets it
-  `timing.max_showing_ms` + 2 s after the last state change.
+- Escape resets the submap inside Hyprland, without the daemon.
+- A Hyprland-side timer resets it after `timeout_ms` (default 17 s) without a
+  key press, even if the daemon is dead.
 - The daemon leaves the submap on every way out of a session: selection,
-  Escape, cancel, watchdog, quit, overlay loss, a click on another window
-  (active window change), a lost event socket and a Hyprland config reload.
-- `wointsd` resets a leftover `woints-keys-…` submap when it starts.
+  Escape, an unbound key, cancel, watchdog, quit, overlay loss, a click on
+  another window (active window change), a lost event socket and a Hyprland
+  config reload.
+- `wointsd` resets a leftover submap when it starts.
 
 If Hyprland is ever left in the submap, run `hyprctl dispatch submap reset`;
 `woints doctor` flags this state.
