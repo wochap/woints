@@ -50,16 +50,24 @@ The `hypr` crate SHALL talk to Hyprland through `$XDG_RUNTIME_DIR/hypr/$HYPRLAND
 - **THEN** the stream yields a submap event with an empty name
 
 ### Requirement: Runtime submap control
-`hypr` SHALL be able to define a named submap with a list of binds at runtime, enter it, reset to the default submap, and read the current submap name. It SHALL use the syntax of the running build: Lua `eval` on Lua-enabled builds, `keyword` / `dispatch` batches otherwise. `hypr` SHALL NOT remove or unbind binds at runtime: on Hyprland 0.56.2, `Keybind:remove()` through `eval` crashes the compositor. Defining a submap that already has binds SHALL be a no-op, so reinstalling does not duplicate binds. On Lua builds, `hypr` SHALL also be able to arm a one-shot compositor-side timer that resets a named submap if a given token is still current when the timer fires.
-
-#### Scenario: Reinstall is idempotent
-- **WHEN** the same submap is defined twice
-- **THEN** `j/binds` lists each bind of that submap once
+`hypr` SHALL be able to enter a named submap, reset to the default submap, read the current submap name, and tell whether `j/binds` lists any bind in a named submap. It SHALL use the dispatch syntax of the running build. `hypr` SHALL NOT define, change or remove binds, submaps or timers, and SHALL NOT send Lua `eval` scripts or `keyword` commands: on Hyprland 0.56.2, `Keybind:remove()` through `eval` crashes the compositor.
 
 #### Scenario: Current submap
 - **WHEN** Hyprland is in the default submap
 - **THEN** reading the current submap returns an empty or `default` name, and both are treated as default
 
+#### Scenario: Submap present
+- **WHEN** `j/binds` lists a catchall bind with `submap = "woints-keys"`
+- **THEN** asking whether submap `woints-keys` has binds returns true, and for `other` returns false
+
+#### Scenario: Reinstall is idempotent
+- **WHEN** the daemon starts, reloads its config, or sees `configreloaded` several times
+- **THEN** it sends no bind or submap definition, so `j/binds` lists the module's binds exactly as the user's config defined them
+
 #### Scenario: Unsupported build
-- **WHEN** defining the submap is rejected by Hyprland
+- **WHEN** Hyprland is not a Lua-enabled build
+- **THEN** no submap `woints-keys` is listed, and the daemon reports the overlay source without sending any definition
+
+#### Scenario: Enter rejected
+- **WHEN** entering the submap is rejected by Hyprland
 - **THEN** the call returns an error carrying Hyprland's reply
